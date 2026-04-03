@@ -1,0 +1,9 @@
+streamlit
+pandas
+plotly
+google-cloud-bigquery
+google-api-python-client
+google-auth
+pytz
+db-dtypes
+google-cloud-secret-manager
