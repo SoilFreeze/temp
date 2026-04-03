@@ -74,47 +74,92 @@ p_df = st.session_state.get("master_df", pd.DataFrame())
 
 def build_standard_sf_graph(df, start_view, end_view):
     try:
+        import re
         display_df = df.copy()
         if display_df.empty: return go.Figure()
         
-        y_range = [-20, 80]
-        display_df['label'] = display_df.apply(lambda r: f"{r.get('Depth', r.get('Bank', 'Unmapped'))}ft ({r.get('NodeNum', 'Unknown')})", axis=1)
+        # 1. Improved Labeling Logic
+        def create_label(r):
+            # Check for Bank first (R1, S3, etc.)
+            if pd.notnull(r.get('Bank')) and str(r['Bank']).strip() != "":
+                pos = str(r['Bank']).strip()
+            # Then check for Depth
+            elif pd.notnull(r.get('Depth')):
+                pos = f"{r['Depth']} ft"
+            else:
+                pos = "Unmapped"
+            return f"{pos} ({r.get('NodeNum', 'Unknown')})"
+
+        display_df['label'] = display_df.apply(create_label, axis=1)
+        
+        # 2. Custom Sorting for Legend (5 ft at top)
+        def sort_key(lbl):
+            # Extract number from "5 ft" or "10 ft"
+            match = re.search(r'(\d+)\s*ft', lbl)
+            if match:
+                return (0, int(match.group(1))) # Depth priority
+            return (1, lbl) # Bank/Other priority
+
+        sorted_labels = sorted(display_df['label'].unique(), key=sort_key)
         
         fig = go.Figure()
-        for lbl in sorted(display_df['label'].unique()):
+        for lbl in sorted_labels:
             sdf = display_df[display_df['label'] == lbl].sort_values('timestamp')
+            # Gap detection
             sdf['gap'] = sdf['timestamp'].diff().dt.total_seconds() / 3600
             if (sdf['gap'] > 6.0).any():
                 gaps = sdf[sdf['gap'] > 6.0].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] -= pd.Timedelta(seconds=1)
                 sdf = pd.concat([sdf, gaps]).sort_values('timestamp')
-            fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
+            
+            fig.add_trace(go.Scatter(
+                x=sdf['timestamp'], 
+                y=sdf['temperature'], 
+                name=lbl, 
+                mode='lines', 
+                connectgaps=False
+            ))
 
-        # Date Grid
+        # 3. Grid and Dark Frame
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             color, width = ("Black", 2) if (ts.weekday() == 0 and ts.hour == 0) else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        # Top and Bottom Dark Lines
         fig.update_xaxes(
-            showline=True, linewidth=2, linecolor='black', mirror=True, # mirror=True adds the top line
+            showline=True, linewidth=2, linecolor='black', mirror=True,
             gridcolor='Gainsboro'
         )
-        
-        # Left and Right Dark Lines
         fig.update_yaxes(
-            title=f"Temperature ({UNIT_LABEL})", 
-            range=y_range, 
-            dtick=5,
-            showline=True, linewidth=2, linecolor='black', mirror=True, # mirror=True adds the right line
-            gridcolor='Gainsboro'
+            title="Temperature (°F)", 
+            range=[-20, 80], 
+            dtick=10,
+            showline=True, linewidth=2, linecolor='black', mirror=True,
+            gridcolor='Gainsboro',
+            minor=dict(dtick=5, showgrid=True, gridcolor='WhiteSmoke', gridwidth=0.5)
         )
         
         fig.add_hline(y=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="Freezing (32°F)")
-        fig.update_layout(plot_bgcolor='white', height=600, margin=dict(r=150))
+        
+        # 4. Prevent Legend Cutoff
+        fig.update_layout(
+            plot_bgcolor='white', 
+            height=600, 
+            margin=dict(r=20, l=20, t=40, b=20),
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02,
+                font=dict(size=10)
+            ),
+            showlegend=True
+        )
         return fig
-    except: return go.Figure()
+    except Exception as e:
+        st.error(f"Graph Error: {e}")
+        return go.Figure()
 
 ########################
 # --- MAIN CONTENT --- #
@@ -166,21 +211,29 @@ else:
                     title="Temperature (°F)", 
                     range=[-20, 80], 
                     dtick=10,
-                    showline=True, linewidth=2, linecolor='black', mirror=True, # Adds Top/Bottom borders
+                    showline=True, linewidth=2, linecolor='black', mirror=True,
                     showgrid=True, 
                     gridcolor='Gray',
                     minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
                 )
                 
-                # --- Y-AXIS (Depth in Feet) ---
+                # --- Y-AXIS (Depth in feet) ---
                 fig_d.update_yaxes(
                     title="Depth (feet)", 
                     range=[y_limit, 0], 
                     dtick=10,
-                    showline=True, linewidth=2, linecolor='black', mirror=True, # Adds Left/Right borders
+                    showline=True, linewidth=2, linecolor='black', mirror=True,
                     showgrid=True, 
                     gridcolor='Gray',
                     minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
+                )
+
+                # Layout Adjustment to prevent legend cutoff
+                fig_d.update_layout(
+                    plot_bgcolor='white', 
+                    height=700,
+                    margin=dict(r=150), # Space for legend
+                    legend=dict(x=1.05, y=1)
                 )
                 
                 
