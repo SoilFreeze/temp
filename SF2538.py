@@ -8,7 +8,8 @@ import pytz
 #########################
 # --- CONFIGURATION --- #
 #########################
-ACTIVE_PROJECT = "2329" 
+# Updated project number and title
+ACTIVE_PROJECT = "2538" 
 PROJECT_TITLE = "Pump 16 Upgrade Project Ferndale, Washington"
 UNIT_LABEL = "°F"
 FREEZING_LINE = 32.0
@@ -22,7 +23,6 @@ MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 @st.cache_resource
 def get_bq_client():
     try:
-        # Looking for secrets in .streamlit/secrets.toml
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             from google.oauth2 import service_account
@@ -30,8 +30,6 @@ def get_bq_client():
                 info, scopes=["https://www.googleapis.com/auth/bigquery"]
             )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
-        # Fallback for local environments with gcloud CLI authenticated
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
@@ -43,7 +41,7 @@ client = get_bq_client()
 # --- GLOBAL DATA LOAD --- #
 ###########################
 if "data_loaded" not in st.session_state:
-    with st.spinner("⚡ Fetching Project Data..."):
+    with st.spinner(f"⚡ Fetching Data for Project {ACTIVE_PROJECT}..."):
         query = f"""
             SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
             FROM `{MASTER_TABLE}`
@@ -77,14 +75,12 @@ def build_standard_sf_graph(df, start_view, end_view):
         display_df = df.copy()
         if display_df.empty: return go.Figure()
         
-        # Fahrenheit Range
         y_range = [-20, 80]
         display_df['label'] = display_df.apply(lambda r: f"{r.get('Depth', r.get('Bank', 'Unmapped'))}ft ({r.get('NodeNum', 'Unknown')})", axis=1)
         
         fig = go.Figure()
         for lbl in sorted(display_df['label'].unique()):
             sdf = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            # Handle 6h data gaps
             sdf['gap'] = sdf['timestamp'].diff().dt.total_seconds() / 3600
             if (sdf['gap'] > 6.0).any():
                 gaps = sdf[sdf['gap'] > 6.0].copy()
@@ -93,12 +89,12 @@ def build_standard_sf_graph(df, start_view, end_view):
                 sdf = pd.concat([sdf, gaps]).sort_values('timestamp')
             fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
-        # Date Grid
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             color, width = ("Black", 2) if (ts.weekday() == 0 and ts.hour == 0) else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
         fig.update_yaxes(title=f"Temp ({UNIT_LABEL})", range=y_range, gridcolor='Gainsboro', dtick=5)
+        # Always present reference line
         fig.add_hline(y=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="Freezing (32°F)")
         fig.update_layout(plot_bgcolor='white', height=600, margin=dict(r=150))
         return fig
@@ -110,7 +106,7 @@ def build_standard_sf_graph(df, start_view, end_view):
 st.header(f"📊 {PROJECT_TITLE}")
 
 if p_df.empty:
-    st.warning("No data found. Please check your BigQuery connection and permissions.")
+    st.warning(f"No approved data found for Project {ACTIVE_PROJECT} in the last 84 days.")
 else:
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
 
@@ -142,6 +138,7 @@ else:
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
                 fig_d.update_xaxes(title=f"Temp ({UNIT_LABEL})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
+                # Always present vertical reference line
                 fig_d.add_vline(x=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2.5)
                 fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
                 fig_d.update_layout(plot_bgcolor='white', height=700)
