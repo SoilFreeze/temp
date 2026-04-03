@@ -147,5 +147,5 @@ else:
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
         latest['Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
-        latest['Pos'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r['Depth']} ft", axis=1)
-        st.dataframe(latest[['Location', 'Pos', 'Temp', 'NodeNum']], use_container_width=True, hide_index=True)
+        latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r['Depth']} ft", axis=1)
+        st.dataframe(latest[['Location', 'Position', 'Temp', 'NodeNum']], use_container_width=True, hide_index=True)
