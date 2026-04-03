@@ -21,14 +21,22 @@ MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 @st.cache_resource
 def get_bq_client():
     try:
+        # Priority 1: Check Streamlit Secrets (for Local or Community Cloud)
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             from google.oauth2 import service_account
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/bigquery"])
+            credentials = service_account.Credentials.from_service_account_info(
+                info, 
+                scopes=["https://www.googleapis.com/auth/bigquery"]
+            )
             return bigquery.Client(credentials=credentials, project=info["project_id"])
+        
+        # Priority 2: Try default environment credentials (only works if logged in via gcloud CLI)
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        # This catch provides a clearer explanation to the UI
+        st.error("Authentication Error: Service Account secrets not found or invalid.")
+        st.info("Check that your .streamlit/secrets.toml file is configured correctly.")
         return None
 
 client = get_bq_client()
