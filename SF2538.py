@@ -119,8 +119,15 @@ else:
         for loc in sorted(p_df['Location'].dropna().unique()):
             with st.expander(f"📈 {loc}", expanded=True):
                 loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                st.plotly_chart(build_standard_sf_graph(loc_data, start_view, end_view), use_container_width=True, key=f"t_{loc}")
+                # Wrap the chart in a bordered container for the frame
+                with st.container(border=True):
+                    st.plotly_chart(
+                        build_standard_sf_graph(loc_data, start_view, end_view), 
+                        use_container_width=True, 
+                        key=f"t_{loc}"
+                    )
 
+    # 2. DEPTH PROFILE TAB
     with tab_depth:
         depth_only = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
         for loc in sorted(depth_only['Location'].unique()):
@@ -137,15 +144,72 @@ else:
                         fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
-                fig_d.update_xaxes(title=f"Temp ({UNIT_LABEL})", range=[-20, 80], dtick=5, showgrid=True, gridcolor='LightGray')
-                # Always present vertical reference line
+                
+                # --- X-AXIS (Temperature) ---
+                fig_d.update_xaxes(
+                    title="Temperature (°F)", 
+                    range=[-20, 80], 
+                    dtick=10,             # Major lines at 10, 20, 30...
+                    showgrid=True, 
+                    gridcolor='Gray',     # Darker major lines
+                    minor=dict(
+                        dtick=5,          # Minor lines at 5, 15, 25...
+                        showgrid=True, 
+                        gridcolor='Gainsboro', # Lighter minor lines
+                        gridwidth=0.5
+                    )
+                )
+                
+                # --- Y-AXIS (Depth in Feet) ---
+                fig_d.update_yaxes(
+                    title="Depth (feet)", 
+                    range=[y_limit, 0], 
+                    dtick=10,             # Major lines at 10, 20, 30...
+                    showgrid=True, 
+                    gridcolor='Gray', 
+                    minor=dict(
+                        dtick=5,          # Minor lines at 5, 15, 25...
+                        showgrid=True, 
+                        gridcolor='Gainsboro', 
+                        gridwidth=0.5
+                    )
+                )
+                
+                # Vertical Freezing Reference
                 fig_d.add_vline(x=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2.5)
-                fig_d.update_yaxes(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='LightGray')
-                fig_d.update_layout(plot_bgcolor='white', height=700)
-                st.plotly_chart(fig_d, use_container_width=True, key=f"d_{loc}")
 
+                fig_d.update_layout(plot_bgcolor='white', height=700)
+                
+                # Framed Container for the graph
+                with st.container(border=True):
+                    st.plotly_chart(fig_d, use_container_width=True, key=f"d_{loc}")
+                    
+   # 3. PROJECT DATA TAB
     with tab_table:
+        # 1. Get the latest reading for each sensor
         latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-        latest['Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
-        latest['Position'] = latest.apply(lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" else f"{r['Depth']} ft", axis=1)
-        st.dataframe(latest[['Location', 'Position', 'Temp', 'NodeNum']], use_container_width=True, hide_index=True)
+        
+        # 2. Format the Temperature and Position columns
+        latest['Temperature'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
+        latest['Position'] = latest.apply(
+            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
+            else (f"{r['Depth']} ft" if pd.notnull(r['Depth']) else "N/A"), 
+            axis=1
+        )
+        
+        # Rename NodeNum for the heading
+        latest['Sensor ID'] = latest['NodeNum']
+
+        # 3. Create a numeric sorting helper for Position 
+        # (This ensures '2 ft' comes before '10 ft')
+        latest['pos_numeric'] = pd.to_numeric(latest['Position'].str.extract('(\d+)', expand=False), errors='coerce')
+
+        # 4. Sort by Location (A-Z) and then by our numeric Position helper
+        latest_sorted = latest.sort_values(by=['Location', 'pos_numeric'], ascending=[True, True])
+
+        # 5. Display the table with full-word headings
+        st.dataframe(
+            latest_sorted[['Location', 'Position', 'Temperature', 'Sensor ID']], 
+            use_container_width=True, 
+            hide_index=True
+        )
