@@ -37,6 +37,8 @@ def get_bq_client():
 
 client = get_bq_client()
 
+
+
 ###########################
 # --- GLOBAL DATA LOAD --- #
 ###########################
@@ -89,12 +91,26 @@ def build_standard_sf_graph(df, start_view, end_view):
                 sdf = pd.concat([sdf, gaps]).sort_values('timestamp')
             fig.add_trace(go.Scatter(x=sdf['timestamp'], y=sdf['temperature'], name=lbl, mode='lines', connectgaps=False))
 
+        # Date Grid
         for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
             color, width = ("Black", 2) if (ts.weekday() == 0 and ts.hour == 0) else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
             fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
 
-        fig.update_yaxes(title=f"Temp ({UNIT_LABEL})", range=y_range, gridcolor='Gainsboro', dtick=5)
-        # Always present reference line
+        # Top and Bottom Dark Lines
+        fig.update_xaxes(
+            showline=True, linewidth=2, linecolor='black', mirror=True, # mirror=True adds the top line
+            gridcolor='Gainsboro'
+        )
+        
+        # Left and Right Dark Lines
+        fig.update_yaxes(
+            title=f"Temperature ({UNIT_LABEL})", 
+            range=y_range, 
+            dtick=5,
+            showline=True, linewidth=2, linecolor='black', mirror=True, # mirror=True adds the right line
+            gridcolor='Gainsboro'
+        )
+        
         fig.add_hline(y=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="Freezing (32°F)")
         fig.update_layout(plot_bgcolor='white', height=600, margin=dict(r=150))
         return fig
