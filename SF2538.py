@@ -165,31 +165,24 @@ else:
                 fig_d.update_xaxes(
                     title="Temperature (°F)", 
                     range=[-20, 80], 
-                    dtick=10,             # Major lines at 10, 20, 30...
+                    dtick=10,
+                    showline=True, linewidth=2, linecolor='black', mirror=True, # Adds Top/Bottom borders
                     showgrid=True, 
-                    gridcolor='Gray',     # Darker major lines
-                    minor=dict(
-                        dtick=5,          # Minor lines at 5, 15, 25...
-                        showgrid=True, 
-                        gridcolor='Gainsboro', # Lighter minor lines
-                        gridwidth=0.5
-                    )
+                    gridcolor='Gray',
+                    minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
                 )
                 
                 # --- Y-AXIS (Depth in Feet) ---
                 fig_d.update_yaxes(
                     title="Depth (feet)", 
                     range=[y_limit, 0], 
-                    dtick=10,             # Major lines at 10, 20, 30...
+                    dtick=10,
+                    showline=True, linewidth=2, linecolor='black', mirror=True, # Adds Left/Right borders
                     showgrid=True, 
-                    gridcolor='Gray', 
-                    minor=dict(
-                        dtick=5,          # Minor lines at 5, 15, 25...
-                        showgrid=True, 
-                        gridcolor='Gainsboro', 
-                        gridwidth=0.5
-                    )
+                    gridcolor='Gray',
+                    minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
                 )
+                
                 
                 # Vertical Freezing Reference
                 fig_d.add_vline(x=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2.5)
