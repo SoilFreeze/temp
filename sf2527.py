@@ -202,6 +202,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         
         locations = sorted(p_df['Location'].dropna().unique())
         for loc in locations:
+            # UNIQUE KEY FIX: Added loc to the key
             with st.expander(f"📍 {loc}", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
                 fig = build_high_speed_graph(
@@ -210,12 +211,14 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                     active_refs=tuple(active_refs), unit_mode=unit_mode, 
                     unit_label=unit_label, display_tz=display_tz 
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                # ADDED KEY HERE
+                st.plotly_chart(fig, use_container_width=True, key=f"timeline_{loc}")
 
     with tab_depth:
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
+            # UNIQUE KEY FIX: Added loc to the key
             with st.expander(f"📏 {loc} Vertical Profile"):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
@@ -231,13 +234,13 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                 fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title=unit_label))
-                st.plotly_chart(fig_d, use_container_width=True)
+                # ADDED KEY HERE
+                st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
 
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round((x-32)*5/9 if unit_mode=='Celsius' else x, 1)}{unit_label}")
         st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values('Location'), use_container_width=True, hide_index=True)
-
 ###########################
 # 4. MAIN UI LAYOUT       #
 ###########################
