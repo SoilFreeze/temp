@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 #################################################################
 # 1. CONFIGURATION: Project 2538 Details                        #
 #################################################################
-TARGET_PROJECT = "2538"             # Matches the 'Project' column
+TARGET_PROJECT = "2538-Ferndale"             # Matches the 'Project' column
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
 DISPLAY_TZ = "America/Los_Angeles"  
