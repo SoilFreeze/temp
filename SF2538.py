@@ -231,9 +231,8 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
-        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
-        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce') [cite: 6, 9]
+        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy() [cite: 15]
         
         for loc in sorted(depth_only['Location'].unique()):
             with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
@@ -253,7 +252,7 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                             .sort_values(['NodeNum', 'diff'])
                             .drop_duplicates('NodeNum')
                             .sort_values('Depth_Num')
-                        )
+                        ) [cite: 14, 15]
                         
                         conv_temps = snap_df['temperature'].apply(
                             lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
@@ -267,33 +266,38 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                             line=dict(shape='spline', smoothing=0.5)
                         ))
 
-                # Logic for Y-axis limit based on max depth [cite: 9]
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                 
                 fig_d.update_layout(
                     plot_bgcolor='white', height=600,
-                    # FIXED WINDOW: Set to [-20, 80] to match timeline graphs
+                    # TEMPERATURE AXIS (X)
                     xaxis=dict(
-                        title=f"Temp ({unit_label})", 
-                        gridcolor='Gainsboro',
+                        title=f"Temp ({unit_label})",
                         range=[-20, 80],
-                        showline=True,
-                        linecolor='black',
-                        mirror=True
+                        # Major Grid: Every 20 degrees
+                        dtick=20,
+                        gridcolor='Gainsboro', 
+                        gridwidth=1.2,
+                        # Minor Grid: Every 5 degrees
+                        minor=dict(dtick=5, gridcolor='whitesmoke', gridwidth=0.8),
+                        showline=True, linecolor='black', mirror=True
                     ),
+                    # DEPTH AXIS (Y)
                     yaxis=dict(
-                        title="Depth (ft)", 
-                        range=[y_limit, 0], 
-                        dtick=10, 
+                        title="Depth (ft)",
+                        range=[y_limit, 0],
+                        # Major Grid: Every 10 feet
+                        dtick=10,
                         gridcolor='Silver',
-                        showline=True,
-                        linecolor='black',
-                        mirror=True
+                        gridwidth=1.2,
+                        # Minor Grid: Every 2.5 feet
+                        minor=dict(dtick=2.5, gridcolor='whitesmoke', gridwidth=0.8),
+                        showline=True, linecolor='black', mirror=True
                     ),
                     legend=dict(orientation="h", y=-0.2)
                 )
                 
-                # Add the 32°F Freezing reference line if in Fahrenheit
+                # Freezing Reference Line matching the Time Graph style
                 freezing_val = 0 if unit_mode == "Celsius" else 32
                 fig_d.add_vline(x=freezing_val, line_dash="dash", line_color="RoyalBlue")
                 
