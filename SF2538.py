@@ -42,36 +42,52 @@ client = get_bq_client()
 ############################
 
 @st.cache_data(ttl=600)
-def get_standalone_portal_data():
+def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    STRICT FILTER: Only pulls data where approve = 'TRUE'.
-    MASKED data is inherently ignored by only selecting 'TRUE'.
+    Updated Data Engine: Uses 'approve' column for visibility logic as per schema.
     """
-    if client is None: return pd.DataFrame()
+    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
+    
+    if view_mode == "client":
+        # Logic: Must be marked 'TRUE' (Approved) AND must NOT be marked 'MASKED'
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND rej.approve = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
+            )
+        """
+    else:
+        # Engineering sees everything except explicit deletions ('FALSE')
+        query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth
+            m.Location, m.Bank, m.Depth, m.Project,
+            rej.approve as is_approved 
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        INNER JOIN `{OVERRIDE_TABLE}` AS rej 
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' 
-               OR m.Project LIKE '2538%')
-        AND rej.approve = 'TRUE' -- STRICT TRUE FILTER
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
-        ORDER BY r.timestamp ASC
+        WHERE m.Project = '{project_id}'
+        {query_filter}
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
+        ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        return client.query(query).to_dataframe()
+        df = client.query(query).to_dataframe()
+        return df
     except Exception as e:
-        st.error(f"Database Query Error: {e}")
+        st.error(f"BQ Error: {e}")
         return pd.DataFrame()
 
 ########################
@@ -127,38 +143,70 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     )
     return fig
 
-def render_client_portal(df):
-    """
-    Standardized Portal UI used in the office app.
-    Uses global constants: TARGET_PROJECT, DISPLAY_TZ, UNIT_LABEL
-    """
-    if df.empty:
-        st.warning(f"No approved data found for project {TARGET_PROJECT}.")
+def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
+    st.header(f"📊 Project Status: {selected_project}")
+    global client
+
+    if not selected_project or selected_project == "All Projects":
+        st.info("💡 Please select a specific project in the sidebar.")
+        return
+    
+    with st.spinner("Loading approved data..."):
+        # The portal specifically filters for manual_rejections.status = 'TRUE' [cite: 15, 16]
+        p_df = get_universal_portal_data(selected_project, view_mode="client")
+    
+    # DEBUG: Help identify if data exists but is being filtered out later
+    if not p_df.empty:
+        st.caption(f"✅ Found {len(p_df)} approved records for {selected_project}.")
+    else:
+        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}. Check the Admin Tools.")
         return
 
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
-        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="portal_weeks_slider")
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
         end_view = pd.Timestamp.now(tz='UTC')
         start_view = end_view - timedelta(weeks=weeks_view)
         
-        locations = sorted(df['Location'].dropna().unique())
+        # Performance: Pre-sort locations
+        locations = sorted(p_df['Location'].dropna().unique())
+        
+        if not locations:
+            st.error("Data loaded, but no 'Location' metadata was found to group the charts.")
+        
         for loc in locations:
             with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
-                loc_data = df[df['Location'] == loc].copy()
-                fig = build_high_speed_graph(loc_data, f"{loc} Approved Data", start_view, end_view, DISPLAY_TZ)
+                loc_data = p_df[p_df['Location'] == loc].copy()
+                
+                # Check if this specific location has data in the selected time window
+                if loc_data.empty:
+                    st.write("No data available for this specific location.")
+                    continue
+
+                fig = build_high_speed_graph(
+                    df=loc_data, 
+                    title=f"{loc} Approved Data", 
+                    start_view=start_view, 
+                    end_view=end_view, 
+                    active_refs=tuple(active_refs), 
+                    unit_mode=unit_mode, 
+                    unit_label=unit_label, 
+                    display_tz=display_tz 
+                )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
-        df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-        depth_only = df.dropna(subset=['Depth_Num', 'Location']).copy()
+        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         for loc in sorted(depth_only['Location'].unique()):
             with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
+                
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 
                 for m_date in mondays:
@@ -167,26 +215,53 @@ def render_client_portal(df):
                                       (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     
                     if not window.empty:
-                        snap_df = (window.assign(diff=(window['timestamp'] - target_ts).abs())
-                                   .sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num'))
+                        snap_df = (
+                            window.assign(diff=(window['timestamp'] - target_ts).abs())
+                            .sort_values(['NodeNum', 'diff'])
+                            .drop_duplicates('NodeNum')
+                            .sort_values('Depth_Num')
+                        )
                         
-                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], 
-                                                 mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
-                                                 line=dict(shape='spline', smoothing=0.5)))
+                        conv_temps = snap_df['temperature'].apply(
+                            lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
+                        )
+                        
+                        fig_d.add_trace(go.Scatter(
+                            x=conv_temps, 
+                            y=snap_df['Depth_Num'], 
+                            mode='lines+markers', 
+                            name=target_ts.strftime('%m/%d/%y'),
+                            line=dict(shape='spline', smoothing=0.5)
+                        ))
 
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                fig_d.update_layout(plot_bgcolor='white', height=600,
-                                    xaxis=dict(title=UNIT_LABEL, gridcolor='Gainsboro'),
-                                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
-                                    legend=dict(orientation="h", y=-0.2))
+                fig_d.update_layout(
+                    plot_bgcolor='white', height=600,
+                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
+                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                    legend=dict(orientation="h", y=-0.2)
+                )
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
     with tab_table:
-        latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
-        latest['Last Sync'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
-        st.dataframe(latest[['Location', 'Depth', 'Current Temp', 'Last Sync']].sort_values(['Location', 'Depth']), 
-                     use_container_width=True, hide_index=True)
+        # Latest Snapshot Table (Fastest way to group latest data)
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        
+        # Efficient vector conversion
+        latest['Current Temp'] = latest['temperature'].apply(
+            lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
+        )
+        
+        latest['Position'] = latest.apply(
+            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
+            else f"{r.get('Depth', '??')} ft", axis=1
+        )
+        
+        st.dataframe(
+            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
+            use_container_width=True, 
+            hide_index=True
+        )
 
 ###########################
 # 4. MAIN UI LAYOUT       #
