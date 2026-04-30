@@ -270,8 +270,20 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 st.title(f"📊 {CLIENT_NAME}")
 st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ}")
 
-# Data engine ensures only rej.approve = 'TRUE' is loaded
-p_df = get_standalone_portal_data()
+# FIX: Define the cutoffs dictionary (required by your get_universal_portal_data)
+PROJECT_VISIBILITY_MASKS = {
+    "2538-Ferndale": "2024-01-01 00:00:00" 
+}
 
-# Call the function you just created
-render_client_portal(p_df)
+# FIX: Call the correct function name with the client view mode
+p_df = get_universal_portal_data(TARGET_PROJECT, view_mode="client")
+
+# Call the UI function
+# NOTE: Ensure the parameters match your render_client_portal definition
+render_client_portal(
+    selected_project=TARGET_PROJECT, 
+    display_tz=DISPLAY_TZ, 
+    unit_mode="Fahrenheit", # or "Celsius"
+    unit_label=UNIT_LABEL, 
+    active_refs=[]
+)
