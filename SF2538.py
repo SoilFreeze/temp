@@ -127,37 +127,33 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     )
     return fig
 
-###########################
-# 4. MAIN UI LAYOUT       #
-###########################
+def render_client_portal(df):
+    """
+    Standardized Portal UI used in the office app.
+    Uses global constants: TARGET_PROJECT, DISPLAY_TZ, UNIT_LABEL
+    """
+    if df.empty:
+        st.warning(f"No approved data found for project {TARGET_PROJECT}.")
+        return
 
-st.title(f"📊 {CLIENT_NAME}")
-st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ}")
-
-p_df = get_standalone_portal_data()
-
-if p_df.empty:
-    st.warning(f"No approved data found for project {TARGET_PROJECT}.")
-else:
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
-        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="portal_weeks_slider")
         end_view = pd.Timestamp.now(tz='UTC')
         start_view = end_view - timedelta(weeks=weeks_view)
         
-        locations = sorted(p_df['Location'].dropna().unique())
+        locations = sorted(df['Location'].dropna().unique())
         for loc in locations:
             with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
-                loc_data = p_df[p_df['Location'] == loc]
+                loc_data = df[df['Location'] == loc].copy()
                 fig = build_high_speed_graph(loc_data, f"{loc} Approved Data", start_view, end_view, DISPLAY_TZ)
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
-        # [Vertical Depth Profile Logic exactly as you had it]
         st.subheader("📏 Vertical Temperature Profile")
-        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+        df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+        depth_only = df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         for loc in sorted(depth_only['Location'].unique()):
             with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
@@ -175,8 +171,8 @@ else:
                                    .sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num'))
                         
                         fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], 
-                                                  mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
-                                                  line=dict(shape='spline', smoothing=0.5)))
+                                                 mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
+                                                 line=dict(shape='spline', smoothing=0.5)))
 
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
                 fig_d.update_layout(plot_bgcolor='white', height=600,
@@ -186,9 +182,21 @@ else:
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
     with tab_table:
-        # Summary Table Logic
-        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
         latest['Last Sync'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
         st.dataframe(latest[['Location', 'Depth', 'Current Temp', 'Last Sync']].sort_values(['Location', 'Depth']), 
                      use_container_width=True, hide_index=True)
+
+###########################
+# 4. MAIN UI LAYOUT       #
+###########################
+
+st.title(f"📊 {CLIENT_NAME}")
+st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ}")
+
+# Data engine ensures only rej.approve = 'TRUE' is loaded
+p_df = get_standalone_portal_data()
+
+# Call the function you just created
+render_client_portal(p_df)
