@@ -45,16 +45,27 @@ def get_portal_data():
     if client is None:
         return pd.DataFrame()
 
-    # Use LIKE '{TARGET_PROJECT}%' to catch "2538-Ferndale"
+    # We manually join raw data to the SNAPSHOT to avoid Drive 403 errors
+    # We use LIKE and TRIM to handle the "2538-Ferndale" vs "2538" mismatch
     query = f"""
         SELECT 
-            NodeNum, timestamp, temperature,
-            Location, Bank, Depth, approve
-        FROM `{MASTER_TABLE}`
-        WHERE CAST(Project AS STRING) LIKE '{TARGET_PROJECT}%'
-        AND approve = 'TRUE'
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
-        ORDER BY timestamp ASC
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata_snapshot` AS m 
+            ON r.NodeNum = m.NodeNum
+        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' 
+               OR m.Project LIKE '{TARGET_PROJECT}%')
+        AND rej.approve = 'TRUE'
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+        ORDER BY r.timestamp ASC
     """
     try:
         return client.query(query).to_dataframe()
