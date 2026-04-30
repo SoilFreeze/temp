@@ -45,7 +45,6 @@ PROJECT_VISIBILITY_MASKS = {
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     if client is None: return pd.DataFrame()
-
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     query = f"""
@@ -88,7 +87,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
     def create_label(r):
-        b, d = str(r.get('Bank', '')).strip(), str(r.get('Depth', '')).strip()
+        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})"
         if d and d.lower() not in ['nan', 'none']: return f"{d}ft ({r['NodeNum']})"
         return f"Node {r['NodeNum']}"
@@ -99,36 +98,30 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # 1. GAP DETECTION: (6.0 hours)
+        # GAP DETECTION: 6.0 hours
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
-            # Insert None values to physically break the line
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # 2. FIX: Set connectgaps=False to respect the gaps inserted above
+        # connectgaps=False ensures the 6hr breaks are visible
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], 
-            y=s_df['temperature'], 
-            name=lbl, 
-            mode='lines+markers', 
-            connectgaps=False,  # <--- CRITICAL CHANGE
+            x=s_df['timestamp'], y=s_df['temperature'], 
+            name=lbl, mode='lines+markers', 
+            connectgaps=False, 
             marker=dict(size=4, opacity=0.8),
             line=dict(width=1.5)
         ))
 
     fig.update_layout(
-        title=f"<b>{title}</b>", 
-        hovermode="x unified",
+        title=f"<b>{title}</b>", hovermode="x unified",
         xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, tickformat='%b %d'),
         yaxis=dict(title="°F", gridcolor='Gainsboro', showline=True, mirror=True, range=[-20, 80]),
-        height=600, 
-        margin=dict(r=150, t=50, b=50),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1),
-        autosize=True 
+        height=600, margin=dict(r=150, t=50, b=50),
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
     return fig
 
@@ -142,19 +135,47 @@ st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
-    locs = sorted(data['Location'].unique())
-    for loc in locs:
-        with st.expander(f"📍 Location: {loc}", expanded=True):
-            loc_df = data[data['Location'] == loc]
-            now_utc = pd.Timestamp.now(tz='UTC')
-            
-            fig = build_high_speed_graph(
-                loc_df, 
-                f"{loc} Data Pipeline", 
-                now_utc - timedelta(weeks=4), 
-                now_utc, 
-                "America/New_York"
-            )
-            st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
+    # RESTORED: THE THREE TABS
+    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+
+    with tab_time:
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="weeks_slider")
+        end_view = pd.Timestamp.now(tz='UTC')
+        start_view = end_view - timedelta(weeks=weeks_view)
+        
+        locs = sorted(data['Location'].unique())
+        for loc in locs:
+            with st.expander(f"📍 {loc}", expanded=True):
+                loc_df = data[data['Location'] == loc]
+                fig = build_high_speed_graph(loc_df, f"{loc} Timeline", start_view, end_view, "America/New_York")
+                st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
+
+    with tab_depth:
+        st.subheader("📏 Vertical Temperature Profile")
+        data['Depth_Num'] = pd.to_numeric(data['Depth'], errors='coerce')
+        depth_only = data.dropna(subset=['Depth_Num']).copy()
+        
+        for loc in sorted(depth_only['Location'].unique()):
+            with st.expander(f"📏 {loc} Vertical Profile"):
+                loc_data = depth_only[depth_only['Location'] == loc].copy()
+                fig_d = go.Figure()
+                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+                for m_date in mondays:
+                    target_ts = m_date.replace(hour=6, minute=0, second=0)
+                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                    if not window.empty:
+                        snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
+                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
+                
+                y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title="°F"))
+                st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
+
+    with tab_table:
+        st.subheader("📋 Latest Sensor Readings")
+        latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
+        st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values('Location'), width='stretch', hide_index=True)
 else:
-    st.info("Loading streams...")
+    st.info("Loading project streams...")
