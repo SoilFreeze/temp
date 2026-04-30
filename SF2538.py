@@ -9,29 +9,15 @@ import pytz
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
-TARGET_PROJECT = "2538-Ferndale"    
-CLIENT_NAME = "Pump 16 Upgrade"     
-LOCATION_STAMP = "Ferndale, WA"     
-DISPLAY_TZ = "America/Los_Angeles"  
-UNIT_LABEL = "°F"                   
-
-PROJECT_ID = "sensorpush-export"
-DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-
-st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
-
-# In Section 1 of your script
 @st.cache_resource
 def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # REQUIRED: You must add the drive scope here to access tables linked to Google Sheets
+            # REQUIRED: Add Drive scope to access metadata and override tables
             SCOPES = [
                 "https://www.googleapis.com/auth/bigquery",
-                "https://www.googleapis.com/auth/drive.readonly" # Added this
+                "https://www.googleapis.com/auth/drive.readonly"
             ]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
@@ -47,12 +33,13 @@ def get_bq_client():
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Updated Data Engine: Uses 'approve' column for visibility logic as per schema.
+    Updated Data Engine: Uses metadata_snapshot and 'approve' column for visibility.
     """
+    # Fallback cutoff if not defined elsewhere
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Logic: Must be marked 'TRUE' (Approved) AND must NOT be marked 'MASKED'
+        # Strict logic: Must be Approved (TRUE) AND NOT Masked [cite: 12, 15]
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -64,20 +51,19 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering sees everything except explicit deletions ('FALSE')
+        # Engineering view logic [cite: 16]
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth, m.Project,
-            rej.approve as is_approved 
+            m.Location, m.Bank, m.Depth, m.Project
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        INNER JOIN `{PROJECT_ID}.{DATASET_ID}.metadata` AS m ON r.NodeNum = m.NodeNum
+        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
@@ -90,6 +76,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         df = client.query(query).to_dataframe()
         return df
     except Exception as e:
+        # This will catch the 403 error if scopes are missing
         st.error(f"BQ Error: {e}")
         return pd.DataFrame()
 
