@@ -58,10 +58,10 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Strict logic: Must be Approved (TRUE) AND NOT Masked
+    # Change: Allow 'TRUE' OR NULL (New/Pending data)
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
-            AND rej.approve = 'TRUE'
+            AND (rej.approve = 'TRUE' OR rej.approve IS NULL) 
             AND NOT EXISTS (
                 SELECT 1 FROM `{OVERRIDE_TABLE}` m 
                 WHERE m.NodeNum = r.NodeNum 
