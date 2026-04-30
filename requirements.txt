@@ -7,3 +7,4 @@ google-auth
 pytz
 db-dtypes
 google-cloud-secret-manager
+tzdata
