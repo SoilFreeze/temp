@@ -9,7 +9,7 @@ import pytz
 #################################################################
 # 1. CONFIGURATION: Project 2527-Elizabeth                      #
 #################################################################
-TARGET_PROJECT = "2527-Elizabeth"    
+TARGET_PROJECT = "2527"    
 CLIENT_NAME = "SJI Erie St"     
 LOCATION_STAMP = "Elizabeth, New Jersey"     
 DISPLAY_TZ = "America/New_York"  
