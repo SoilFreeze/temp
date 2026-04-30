@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 TARGET_PROJECT = "2527"
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
+# Ensure this matches your master table exactly
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
@@ -32,7 +33,7 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# CRITICAL: Initialize client globally before defining the data engine
+# CRITICAL: Initialize client globally so functions can see it
 client = get_bq_client()
 
 PROJECT_VISIBILITY_MASKS = {
@@ -46,14 +47,15 @@ PROJECT_VISIBILITY_MASKS = {
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Robust Data Engine: Handles Project 2527 (Elizabeth) inconsistencies.
+    ULTRA-ROBUST FILTER:
+    - Handles case-sensitivity (True vs TRUE)
+    - Trims spaces from Node IDs
+    - Allows 'Pending' (NULL) data so 114 nodes stay visible
     """
-    if client is None: 
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # We use a filter that allows TRUE or NULL (Pending) to keep sensors from vanishing
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -76,7 +78,7 @@ def get_universal_portal_data(project_id):
     """
     try:
         df = client.query(query).to_dataframe()
-        # Ensure Bank and Depth are strings for labeling
+        # Clean metadata strings to prevent labeling errors
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
         return df
@@ -94,9 +96,9 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
+    # Labeling priority: Bank -> Depth -> NodeID
     def create_label(r):
-        b = str(r['Bank']).strip()
-        d = str(r['Depth']).strip()
+        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b: return f"Bank {b} ({r['NodeNum']})"
         if d: return f"{d}ft ({r['NodeNum']})"
         return f"Node {r['NodeNum']}"
@@ -107,7 +109,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # Gap Detection relaxed to 48h to prevent invisible lines for sparse 2527 data
+        # Gap Detection (Relaxed to 48h for Project 2527)
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 48.0
         if gap_mask.any():
@@ -116,7 +118,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # Mode lines+markers and connectgaps=True ensures visibility
+        # Mode lines+markers + connectgaps ensures sparse Elizabeth data is visible
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines+markers', 
@@ -151,7 +153,7 @@ if not data.empty:
                 pd.Timestamp.now(tz='UTC') - timedelta(weeks=4), 
                 pd.Timestamp.now(tz='UTC'), "America/New_York"
             )
-            # Unique key prevents StreamlitDuplicateElementId
-            st.plotly_chart(fig, use_container_width=True, key=f"graph_{loc}")
+            # Updated to width='stretch' for 2026 standards
+            st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
 else:
-    st.info("Searching for Project 2527 data... If this persists, verify BigQuery Metadata matches.")
+    st.info("Syncing Project 2527 streams... (Check BQ if this persists)")
