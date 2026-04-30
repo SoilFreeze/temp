@@ -7,9 +7,9 @@ from datetime import datetime, timedelta
 import pytz
 
 #################################################################
-# 1. CONFIGURATION: Project Portability                         #
+# 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
-TARGET_PROJECT = "2538-Ferndale"    # Matches your exact Project ID
+TARGET_PROJECT = "2538-Ferndale"    
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
 DISPLAY_TZ = "America/Los_Angeles"  
@@ -17,7 +17,6 @@ UNIT_LABEL = "°F"
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-# Snapshot to avoid Drive 403 errors
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
@@ -45,8 +44,8 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_standalone_portal_data():
     """
-    Stand-alone data engine: Joins raw tables to the snapshot metadata.
-    Filters strictly for 'TRUE' approvals in the manual_rejections table.
+    STRICT FILTER: Only pulls data where approve = 'TRUE'.
+    MASKED data is inherently ignored by only selecting 'TRUE'.
     """
     if client is None: return pd.DataFrame()
 
@@ -65,7 +64,7 @@ def get_standalone_portal_data():
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' 
                OR m.Project LIKE '2538%')
-        AND rej.approve = 'TRUE'
+        AND rej.approve = 'TRUE' -- STRICT TRUE FILTER
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY r.timestamp ASC
     """
@@ -80,19 +79,32 @@ def get_standalone_portal_data():
 ########################
 
 def build_high_speed_graph(df, title, start_view, end_view, display_tz):
-    """
-    Matches your original graphing engine with Black Monday / Gray Midnight lines.
-    """
     if df.empty: return go.Figure().update_layout(title="No data available.")
 
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
+    # LEGEND LOGIC: Include Bank and Depth
+    pdf['label'] = pdf.apply(
+        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if pd.notnull(r['Bank']) and str(r['Bank']).strip().lower() not in ["", "none", "nan", "null"]
+        else f"{r.get('Depth', '??')}ft ({r.get('NodeNum')})", axis=1
+    )
+    
     fig = go.Figure()
-    for lbl in sorted(pdf['NodeNum'].unique()):
-        ldf = pdf[pdf['NodeNum'] == lbl]
+    for lbl in sorted(pdf['label'].unique()):
+        s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
+        
+        # GAP DETECTION: Break lines if > 6 hours
+        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gap_mask = s_df['gap_hrs'] > 6.0
+        if gap_mask.any():
+            gaps = s_df[gap_mask].copy()
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+
         fig.add_trace(go.Scattergl(
-            x=ldf['timestamp'], y=ldf['temperature'], 
+            x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines', connectgaps=False
         ))
 
@@ -104,18 +116,19 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
 
     fig.add_vline(x=pd.Timestamp.now(tz=display_tz), line_width=2, line_color="Red", line_dash="dash")
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F")
+    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F Freezing")
 
     fig.update_layout(
         title=f"<b>{title}</b>", plot_bgcolor='white', hovermode="x unified",
         xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True, tickformat='%b %d'),
         yaxis=dict(title=UNIT_LABEL, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True, range=[-20, 80]),
-        height=550, margin=dict(r=150)
+        height=550, margin=dict(r=150),
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left")
     )
     return fig
 
 ###########################
-# 4. PAGE LAYOUT (Original)#
+# 4. MAIN UI LAYOUT       #
 ###########################
 
 st.title(f"📊 {CLIENT_NAME}")
@@ -141,6 +154,7 @@ else:
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
+        # [Vertical Depth Profile Logic exactly as you had it]
         st.subheader("📏 Vertical Temperature Profile")
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
@@ -172,6 +186,7 @@ else:
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
     with tab_table:
+        # Summary Table Logic
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
         latest['Last Sync'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
