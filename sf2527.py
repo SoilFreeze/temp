@@ -46,18 +46,9 @@ client = get_bq_client()
 # 2. DATA ENGINE LOGIC     #
 ############################
 
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, view_mode="engineering"):
-    if client is None: return pd.DataFrame()
-
-    # Match the 14-character name exactly
-    target = "2527-Elizabeth" 
-    
-    query = f"""
+query = f"""
         SELECT 
-            r.NodeNum, 
-            r.timestamp, 
-            AVG(r.temperature) as temperature, -- Take the average of those 8 points
+            r.NodeNum, r.timestamp, r.temperature,
             m.Location, m.Bank, m.Depth, m.Project
         FROM (
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
@@ -65,11 +56,9 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{target}'
-        GROUP BY 1, 2, 4, 5, 6, 7 -- This "squashes" the 8 rows into 1 single row
+        WHERE m.Project = '2527-Elizabeth'
+        -- NEW: This picks exactly 1 row even if 8 exist in the metadata
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY r.NodeNum, r.timestamp ORDER BY m.Location) = 1
         ORDER BY r.timestamp ASC
     """
     try:
