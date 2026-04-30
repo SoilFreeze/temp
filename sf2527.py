@@ -88,9 +88,9 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
     def create_label(r):
-        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b: return f"Bank {b} ({r['NodeNum']})"
-        if d: return f"{d}ft ({r['NodeNum']})"
+        b, d = str(r.get('Bank', '')).strip(), str(r.get('Depth', '')).strip()
+        if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})"
+        if d and d.lower() not in ['nan', 'none']: return f"{d}ft ({r['NodeNum']})"
         return f"Node {r['NodeNum']}"
 
     pdf['label'] = pdf.apply(create_label, axis=1)
@@ -99,20 +99,23 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # GAP DETECTION: Reverted to 6.0 hours
+        # 1. GAP DETECTION: (6.0 hours)
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
+            # Insert None values to physically break the line
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # Using go.Scatter + connectgaps=True + markers to ensure visibility
+        # 2. FIX: Set connectgaps=False to respect the gaps inserted above
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines+markers', 
-            connectgaps=True, 
+            x=s_df['timestamp'], 
+            y=s_df['temperature'], 
+            name=lbl, 
+            mode='lines+markers', 
+            connectgaps=False,  # <--- CRITICAL CHANGE
             marker=dict(size=4, opacity=0.8),
             line=dict(width=1.5)
         ))
