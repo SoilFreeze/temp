@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 #################################################################
 # 1. CONFIGURATION: Project 2538 Details                        #
 #################################################################
-TARGET_PROJECT = "2538"             
+TARGET_PROJECT = "2538"             # Matches the 'Project' column
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
 DISPLAY_TZ = "America/Los_Angeles"  
@@ -16,8 +16,8 @@ UNIT_LABEL = "°F"
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+# Use the single table revealed in your screenshot
+MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
@@ -45,25 +45,16 @@ def get_portal_data():
     if client is None:
         return pd.DataFrame()
 
-    # JOIN LOGIC: Maps raw data to metadata snapshot and verifies status in rejections
-    # We use TRIM and CAST to ensure IDs like 2538 match correctly regardless of format
+    # Query directly from master_data which contains all necessary fields
     query = f"""
         SELECT 
-            r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth
-        FROM (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        INNER JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' OR m.Project = {TARGET_PROJECT})
-        AND rej.approve = 'TRUE'
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
-        ORDER BY r.timestamp ASC
+            NodeNum, timestamp, temperature,
+            Location, Bank, Depth, approve
+        FROM `{MASTER_TABLE}`
+        WHERE TRIM(CAST(Project AS STRING)) = '{TARGET_PROJECT}'
+        AND approve = 'TRUE'
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+        ORDER BY timestamp ASC
     """
     try:
         return client.query(query).to_dataframe()
@@ -125,7 +116,7 @@ st.caption(f"Project ID: {TARGET_PROJECT} | Current Time: {now_ts}")
 
 with st.sidebar:
     st.header("Settings")
-    weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
+    weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
@@ -133,8 +124,7 @@ with st.sidebar:
 df = get_portal_data()
 
 if df.empty:
-    st.warning(f"No approved data found for project {TARGET_PROJECT}.")
-    st.info("💡 **Verification Step:** Ensure that your NodeNums in the `manual_rejections` table exactly match those in the `metadata_snapshot` table.")
+    st.warning(f"No approved data found for project {TARGET_PROJECT} in the master_data table.")
 else:
     tab1, tab2, tab3 = st.tabs(["📈 Timeline", "📏 Profiles", "📋 Table"])
     
@@ -147,7 +137,7 @@ else:
         df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
         depth_only = df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} - Weekly Snapshots"):
+            with st.expander(f"📏 {loc} - Snapshots"):
                 fig_d = go.Figure()
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 for m_date in mondays:
