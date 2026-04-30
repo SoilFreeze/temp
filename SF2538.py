@@ -33,7 +33,7 @@ def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # Drive scope is required to access metadata_snapshot if it's a linked Sheet
+            # REQUIRED: BigQuery + Drive Read-Only Scopes
             SCOPES = [
                 "https://www.googleapis.com/auth/bigquery",
                 "https://www.googleapis.com/auth/drive.readonly"
@@ -45,8 +45,8 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# --- CRITICAL FIX: Initialize the client variable ---
-client = get_bq_client() 
+# CRITICAL: Re-initialize the client variable
+client = get_bq_client()
 
 ############################
 # 2. DATA ENGINE LOGIC     #
@@ -55,16 +55,16 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    Data Engine using 'approve' status for visibility[cite: 13, 14].
+    STRICT CLIENT FILTER: 
+    1. Only pulls data where approve = 'TRUE'[cite: 15].
+    2. Explicitly EXCLUDES any data marked as 'MASKED' for that hour.
     """
-    # Safety check for the global client variable
-    if client is None: 
-        return pd.DataFrame()
+    if client is None: return pd.DataFrame()
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Logic: Must be Approved (TRUE) AND NOT Masked [cite: 12, 15]
+        # Strict logic: Must be Approved (TRUE) AND NOT Masked
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -76,7 +76,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering sees everything except explicit deletions (FALSE) [cite: 16]
+        # Engineering view sees all non-deleted data [cite: 16]
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -84,25 +84,25 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             r.NodeNum, r.timestamp, r.temperature,
             m.Location, m.Bank, m.Depth, m.Project
         FROM (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` [cite: 2, 3]
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
             UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` [cite: 2]
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum [cite: 5, 8]
+        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
-            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp [cite: 11]
-        WHERE m.Project = '{project_id}' [cite: 5, 9]
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE m.Project = '{project_id}'
         {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
+        # Ensure the query is processed as a string with no hidden array formatting
         return client.query(query).to_dataframe()
     except Exception as e:
         st.error(f"BQ Error: {e}")
         return pd.DataFrame()
-
 ########################
 # 3. GRAPHING ENGINE   #
 ########################
