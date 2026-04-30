@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 TARGET_PROJECT = "2527"
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-# Ensure this matches your master table exactly
+# Use the master metadata table for all 114 nodes
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
@@ -33,7 +33,7 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# CRITICAL: Initialize client globally so functions can see it
+# Global Client Initialization
 client = get_bq_client()
 
 PROJECT_VISIBILITY_MASKS = {
@@ -47,10 +47,10 @@ PROJECT_VISIBILITY_MASKS = {
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    ULTRA-ROBUST FILTER:
-    - Handles case-sensitivity (True vs TRUE)
-    - Trims spaces from Node IDs
-    - Allows 'Pending' (NULL) data so 114 nodes stay visible
+    Robust Data Engine:
+    - Casts project to string for comparison
+    - Handles case-insensitive 'TRUE'/'True' logic
+    - Allows 'Pending' (NULL) data so nodes don't vanish
     """
     if client is None: return pd.DataFrame()
 
@@ -96,7 +96,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Labeling priority: Bank -> Depth -> NodeID
+    # Priority Labeling: Bank -> Depth -> NodeID
     def create_label(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b: return f"Bank {b} ({r['NodeNum']})"
@@ -109,7 +109,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # Gap Detection (Relaxed to 48h for Project 2527)
+        # Relaxed Gap Detection for sparse 2527 data
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 48.0
         if gap_mask.any():
@@ -118,19 +118,25 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # Mode lines+markers + connectgaps ensures sparse Elizabeth data is visible
-        fig.add_trace(go.Scattergl(
+        # Using go.Scatter (SVG) instead of Scattergl for more stable initial rendering
+        # connectgaps=True bridges 'invisible' segments
+        fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines+markers', 
-            connectgaps=True, marker=dict(size=5)
+            connectgaps=True, 
+            marker=dict(size=4, opacity=0.8),
+            line=dict(width=1.5)
         ))
 
     fig.update_layout(
-        title=f"<b>{title}</b>", hovermode="x unified",
+        title=f"<b>{title}</b>", 
+        hovermode="x unified",
         xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, tickformat='%b %d'),
         yaxis=dict(title="°F", gridcolor='Gainsboro', showline=True, mirror=True, range=[-20, 80]),
-        height=600, margin=dict(r=150),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
+        height=600, 
+        margin=dict(r=150, t=50, b=50),
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1),
+        autosize=True # Forces Plotly to try and fill the container
     )
     return fig
 
@@ -141,19 +147,29 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 st.title(f"📊 Project {TARGET_PROJECT} Status")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 
-data = get_universal_portal_data(TARGET_PROJECT)
+# Use a container to hold the data fetch
+with st.spinner("Fetching Elizabeth Project Streams..."):
+    data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
     locs = sorted(data['Location'].unique())
     for loc in locs:
-        with st.expander(f"📍 {loc}", expanded=True):
+        # Expanding the container helps Plotly calculate width correctly
+        with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = data[data['Location'] == loc]
+            
+            # Localize window boundaries
+            now_utc = pd.Timestamp.now(tz='UTC')
+            
             fig = build_high_speed_graph(
-                loc_df, f"{loc} Data", 
-                pd.Timestamp.now(tz='UTC') - timedelta(weeks=4), 
-                pd.Timestamp.now(tz='UTC'), "America/New_York"
+                loc_df, 
+                f"{loc} Data Pipeline", 
+                now_utc - timedelta(weeks=4), 
+                now_utc, 
+                "America/New_York"
             )
-            # Updated to width='stretch' for 2026 standards
+            
+            # Using width='stretch' for new 2026 Streamlit standards
             st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
 else:
-    st.info("Syncing Project 2527 streams... (Check BQ if this persists)")
+    st.info("No data found for Project 2527. Checking database for latest pings...")
