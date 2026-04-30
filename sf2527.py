@@ -5,21 +5,55 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 
-# --- SECTION 1: CONFIG ---
+#################################################################
+# 1. CONFIGURATION & CLIENT INITIALIZATION                      #
+#################################################################
 TARGET_PROJECT = "2527"
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-# Ensure this matches your master table exactly
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
-# --- SECTION 2: ROBUST DATA ENGINE ---
+st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
+
+@st.cache_resource
+def get_bq_client():
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            SCOPES = [
+                "https://www.googleapis.com/auth/bigquery",
+                "https://www.googleapis.com/auth/drive.readonly"
+            ]
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
+        return bigquery.Client(project=PROJECT_ID)
+    except Exception as e:
+        st.error(f"Authentication Failed: {e}")
+        return None
+
+# CRITICAL: Initialize client globally before defining the data engine
+client = get_bq_client()
+
+PROJECT_VISIBILITY_MASKS = {
+    "2527": "2026-01-01 00:00:00"
+}
+
+############################
+# 2. DATA ENGINE LOGIC     #
+############################
+
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    if client is None: return pd.DataFrame()
+    """
+    Robust Data Engine: Handles Project 2527 (Elizabeth) inconsistencies.
+    """
+    if client is None: 
+        return pd.DataFrame()
 
-    # We use a broad engineering-style filter first to ensure data loads
-    # Then we apply the 'client' logic to hide MASKED data only.
+    cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
+    
+    # We use a filter that allows TRUE or NULL (Pending) to keep sensors from vanishing
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -35,28 +69,31 @@ def get_universal_portal_data(project_id):
             ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(rej.NodeNum)) 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE CAST(m.Project AS STRING) = '{project_id}'
+        AND r.timestamp >= '{cutoff}'
         AND (UPPER(CAST(rej.approve AS STRING)) != 'FALSE' OR rej.approve IS NULL)
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY r.timestamp ASC
     """
     try:
         df = client.query(query).to_dataframe()
-        # Fix: Ensure Depth and Bank are strings to prevent labeling errors
+        # Ensure Bank and Depth are strings for labeling
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
         return df
     except Exception as e:
-        st.error(f"BQ Error: {e}")
+        st.error(f"BQ Query Error: {e}")
         return pd.DataFrame()
 
-# --- SECTION 3: REPAIRED GRAPHING ENGINE ---
+########################
+# 3. GRAPHING ENGINE   #
+########################
+
 def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     if df.empty: return go.Figure().update_layout(title="No data available.")
 
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # FORCED LABELING: Every sensor MUST have a name to be visible
     def create_label(r):
         b = str(r['Bank']).strip()
         d = str(r['Depth']).strip()
@@ -70,7 +107,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # GAP DETECTION: Relaxed to 48h so sparse Elizabeth data doesn't "vanish"
+        # Gap Detection relaxed to 48h to prevent invisible lines for sparse 2527 data
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 48.0
         if gap_mask.any():
@@ -79,8 +116,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # FIX: mode='lines+markers' ensures sparse points are visible
-        # FIX: connectgaps=True bridges the invisible segments
+        # Mode lines+markers and connectgaps=True ensures visibility
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines+markers', 
@@ -89,15 +125,20 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="x unified",
-        xaxis=dict(range=[start_view, end_view], showline=True, mirror=True),
+        xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, tickformat='%b %d'),
         yaxis=dict(title="°F", gridcolor='Gainsboro', showline=True, mirror=True, range=[-20, 80]),
         height=600, margin=dict(r=150),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
     return fig
 
-# --- SECTION 4: RENDER ---
+###########################
+# 4. MAIN UI LAYOUT       #
+###########################
+
 st.title(f"📊 Project {TARGET_PROJECT} Status")
+st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
+
 data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
@@ -105,12 +146,12 @@ if not data.empty:
     for loc in locs:
         with st.expander(f"📍 {loc}", expanded=True):
             loc_df = data[data['Location'] == loc]
-            # Use unique keys to prevent StreamlitDuplicateElementId
             fig = build_high_speed_graph(
                 loc_df, f"{loc} Data", 
                 pd.Timestamp.now(tz='UTC') - timedelta(weeks=4), 
                 pd.Timestamp.now(tz='UTC'), "America/New_York"
             )
+            # Unique key prevents StreamlitDuplicateElementId
             st.plotly_chart(fig, use_container_width=True, key=f"graph_{loc}")
 else:
-    st.error("No data found. Check if NodeNums in 'metadata' match the raw tables.")
+    st.info("Searching for Project 2527 data... If this persists, verify BigQuery Metadata matches.")
