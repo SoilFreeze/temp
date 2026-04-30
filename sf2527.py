@@ -57,7 +57,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    if view_mode == "client":
     # MODIFIED: Removed strict 'TRUE' requirement to allow new data to show
     # Added a check that allows NULL (Pending) data
     query_filter = f"""
