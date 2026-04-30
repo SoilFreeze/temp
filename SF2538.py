@@ -45,13 +45,13 @@ def get_portal_data():
     if client is None:
         return pd.DataFrame()
 
-    # Query directly from master_data which contains all necessary fields
+    # Use LIKE '{TARGET_PROJECT}%' to catch "2538-Ferndale"
     query = f"""
         SELECT 
             NodeNum, timestamp, temperature,
             Location, Bank, Depth, approve
         FROM `{MASTER_TABLE}`
-        WHERE TRIM(CAST(Project AS STRING)) = '{TARGET_PROJECT}'
+        WHERE CAST(Project AS STRING) LIKE '{TARGET_PROJECT}%'
         AND approve = 'TRUE'
         AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY timestamp ASC
