@@ -12,7 +12,7 @@ import pytz
 TARGET_PROJECT = "2538"             # Matches the 'Project' column in metadata
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
-DISPLAY_TZ = "US/Pacific"           # Set your custom timezone
+DISPLAY_TZ = "America/Los_Angeles"         # Set your custom timezone
 UNIT_LABEL = "°F"                   
 
 PROJECT_ID = "sensorpush-export"
