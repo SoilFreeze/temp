@@ -116,7 +116,12 @@ def build_custom_graph(df, title, lookback_weeks):
 ###########################
 
 st.title(f"📊 {CLIENT_NAME}")
-st.caption(f"Project ID: {TARGET_PROJECT} | Current Time ({DISPLAY_TZ}): {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%m/%d %H:%M')}")
+try:
+    now_ts = pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%m/%d %H:%M')
+except Exception:
+    now_ts = pd.Timestamp.now(tz='UTC').strftime('%m/%d %H:%M UTC')
+
+st.caption(f"Project ID: {TARGET_PROJECT} | Current Time: {now_ts}")
 
 with st.sidebar:
     st.header("Settings")
