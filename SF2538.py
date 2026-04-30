@@ -107,13 +107,22 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 # 3. GRAPHING ENGINE   #
 ########################
 
-def build_high_speed_graph(df, title, start_view, end_view, display_tz):
+# Added active_refs, unit_mode, and unit_label to the parameters
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz):
     if df.empty: return go.Figure().update_layout(title="No data available.")
 
     pdf = df.copy()
+    
+    # Unit Conversion Logic
+    if unit_mode == "Celsius":
+        pdf['temperature'] = (pdf['temperature'] - 32) * 5/9
+        freezing_line = 0
+    else:
+        freezing_line = 32
+
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # LEGEND LOGIC: Include Bank and Depth
+    # LEGEND LOGIC: Include Bank and Depth [cite: 6, 9]
     pdf['label'] = pdf.apply(
         lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if pd.notnull(r['Bank']) and str(r['Bank']).strip().lower() not in ["", "none", "nan", "null"]
         else f"{r.get('Depth', '??')}ft ({r.get('NodeNum')})", axis=1
@@ -137,20 +146,31 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             name=lbl, mode='lines', connectgaps=False
         ))
 
-    # Grid Hierarchy
+    # Grid Hierarchy (Monday lines vs Daily lines)
     grid_days = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), freq='D', tz=display_tz)
     for ts in grid_days:
         color, width, dash = ("rgba(0,0,0,1)", 1.2, "solid") if ts.weekday() == 0 else ("rgba(128,128,128,0.4)", 0.8, "dot")
         fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
 
+    # Current Time Marker
     fig.add_vline(x=pd.Timestamp.now(tz=display_tz), line_width=2, line_color="Red", line_dash="dash")
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F Freezing")
+    
+    # Standard Freezing Reference Line
+    fig.add_hline(y=freezing_line, line_dash="dash", line_color="RoyalBlue", 
+                 annotation_text=f"{freezing_line}{unit_label} Freezing")
+    
+    # CUSTOM PROJECT REFERENCE LINES (active_refs)
+    for ref in active_refs:
+        try:
+            val = float(ref)
+            fig.add_hline(y=val, line_dash="dot", line_color="Orange", annotation_text=f"Ref: {val}{unit_label}")
+        except: continue
 
     fig.update_layout(
         title=f"<b>{title}</b>", plot_bgcolor='white', hovermode="x unified",
         xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True, tickformat='%b %d'),
-        yaxis=dict(title=UNIT_LABEL, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True, range=[-20, 80]),
+        yaxis=dict(title=unit_label, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True, range=[-20, 80]),
         height=550, margin=dict(r=150),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1, xanchor="left")
     )
