@@ -61,10 +61,9 @@ def get_portal_data():
         INNER JOIN `{PROJECT_ID}.{DATASET_ID}.manual_rejections` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        # Updated filter to catch "2538", "2538-Ferndale", etc.
-        WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' 
-           OR m.Project LIKE '{TARGET_PROJECT}%')
-        AND rej.approve = 'TRUE'
+        # This catches both "2538" and "2538-Ferndale" for all locations
+        WHERE (m.Project = '2538' OR m.Project LIKE '2538%')
+            AND rej.approve = 'TRUE'
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY r.timestamp ASC
     """
