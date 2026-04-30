@@ -267,13 +267,36 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                             line=dict(shape='spline', smoothing=0.5)
                         ))
 
+                # Logic for Y-axis limit based on max depth [cite: 9]
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
+                
                 fig_d.update_layout(
                     plot_bgcolor='white', height=600,
-                    xaxis=dict(title=f"Temp ({unit_label})", gridcolor='Gainsboro'),
-                    yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, gridcolor='Silver'),
+                    # FIXED WINDOW: Set to [-20, 80] to match timeline graphs
+                    xaxis=dict(
+                        title=f"Temp ({unit_label})", 
+                        gridcolor='Gainsboro',
+                        range=[-20, 80],
+                        showline=True,
+                        linecolor='black',
+                        mirror=True
+                    ),
+                    yaxis=dict(
+                        title="Depth (ft)", 
+                        range=[y_limit, 0], 
+                        dtick=10, 
+                        gridcolor='Silver',
+                        showline=True,
+                        linecolor='black',
+                        mirror=True
+                    ),
                     legend=dict(orientation="h", y=-0.2)
                 )
+                
+                # Add the 32°F Freezing reference line if in Fahrenheit
+                freezing_val = 0 if unit_mode == "Celsius" else 32
+                fig_d.add_vline(x=freezing_val, line_dash="dash", line_color="RoyalBlue")
+                
                 st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
 
     with tab_table:
