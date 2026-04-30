@@ -5,273 +5,166 @@ from google.cloud import bigquery
 from datetime import datetime, timedelta
 import pytz
 
-#########################
-# --- CONFIGURATION --- #
-#########################
-# Updated project number and title
-ACTIVE_PROJECT = "2538" 
-PROJECT_TITLE = "Pump 16 Upgrade Project Ferndale, Washington"
-UNIT_LABEL = "°F"
-FREEZING_LINE = 32.0
+#################################################################
+# 1. CONFIGURATION: Change these for each project deployment    #
+#################################################################
+TARGET_PROJECT = "2538"             # Must match Project ID in BigQuery
+CLIENT_NAME = "Pump 16 Upgrade"     # Large Header
+LOCATION_STAMP = "Ferndale, WA"     # Sub-header
+DISPLAY_TZ = "US/Pacific"           # Set your custom timezone here
+UNIT_LABEL = "°F"                   # Measurement units
 
-st.set_page_config(page_title=PROJECT_TITLE, layout="wide")
-
-DATASET_ID = "Temperature" 
+# Database Constants
 PROJECT_ID = "sensorpush-export"
-MASTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+DATASET_ID = "Temperature"
+# Updated to use your snapshot table to avoid Drive 403 errors
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
 @st.cache_resource
 def get_bq_client():
-    try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            from google.oauth2 import service_account
-            credentials = service_account.Credentials.from_service_account_info(
-                info, scopes=["https://www.googleapis.com/auth/bigquery"]
-            )
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        return bigquery.Client(project=PROJECT_ID)
-    except Exception as e:
-        st.error(f"Authentication Failed: {e}")
-        return None
+    """Returns a BigQuery client using default credentials."""
+    return bigquery.Client(project=PROJECT_ID)
 
 client = get_bq_client()
 
-
-
-###########################
-# --- GLOBAL DATA LOAD --- #
-###########################
-if "data_loaded" not in st.session_state:
-    with st.spinner(f"⚡ Fetching Data for Project {ACTIVE_PROJECT}..."):
-        query = f"""
-            SELECT timestamp, temperature, Depth, Location, Bank, NodeNum, approve
-            FROM `{MASTER_TABLE}`
-            WHERE CAST(Project AS STRING) = '{ACTIVE_PROJECT}' 
-            AND (approve = 'TRUE' OR approve = 'true')
-            AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-            ORDER BY timestamp ASC
-        """
-        try:
-            if client is None:
-                st.stop()
-            df = client.query(query).to_dataframe()
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.UTC) if df['timestamp'].dt.tz else pd.to_datetime(df['timestamp']).dt.tz_localize(pytz.UTC)
-                df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
-                st.session_state.master_df = df
-                st.session_state.data_loaded = True
-            else:
-                st.session_state.master_df = pd.DataFrame()
-        except Exception as e:
-            st.error(f"Sync Error: {e}")
-
-p_df = st.session_state.get("master_df", pd.DataFrame())
-
 ############################
-# --- GRAPHING ENGINES --- #
+# 2. DATA ENGINE LOGIC     #
 ############################
 
-def build_standard_sf_graph(df, start_view, end_view):
+@st.cache_data(ttl=600)
+def get_portal_data():
+    """
+    Queries only approved data for the specific project.
+    Logic: Must be 'TRUE' approved and NOT 'MASKED'.
+    """
+    query = f"""
+        SELECT 
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE m.Project = '{TARGET_PROJECT}'
+        AND rej.approve = 'TRUE' 
+        AND NOT EXISTS (
+            SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
+            WHERE m2.NodeNum = r.NodeNum 
+            AND m2.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+            AND m2.approve = 'MASKED'
+        )
+        ORDER BY r.timestamp ASC
+    """
     try:
-        import re
-        display_df = df.copy()
-        if display_df.empty: return go.Figure()
-        
-        # 1. Improved Labeling Logic
-        def create_label(r):
-            # Check for Bank first (R1, S3, etc.)
-            if pd.notnull(r.get('Bank')) and str(r['Bank']).strip() != "":
-                pos = str(r['Bank']).strip()
-            # Then check for Depth
-            elif pd.notnull(r.get('Depth')):
-                pos = f"{r['Depth']} ft"
-            else:
-                pos = "Unmapped"
-            return f"{pos} ({r.get('NodeNum', 'Unknown')})"
-
-        display_df['label'] = display_df.apply(create_label, axis=1)
-        
-        # 2. Custom Sorting for Legend (5 ft at top)
-        def sort_key(lbl):
-            # Extract number from "5 ft" or "10 ft"
-            match = re.search(r'(\d+)\s*ft', lbl)
-            if match:
-                return (0, int(match.group(1))) # Depth priority
-            return (1, lbl) # Bank/Other priority
-
-        sorted_labels = sorted(display_df['label'].unique(), key=sort_key)
-        
-        fig = go.Figure()
-        for lbl in sorted_labels:
-            sdf = display_df[display_df['label'] == lbl].sort_values('timestamp')
-            # Gap detection
-            sdf['gap'] = sdf['timestamp'].diff().dt.total_seconds() / 3600
-            if (sdf['gap'] > 6.0).any():
-                gaps = sdf[sdf['gap'] > 6.0].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] -= pd.Timedelta(seconds=1)
-                sdf = pd.concat([sdf, gaps]).sort_values('timestamp')
-            
-            fig.add_trace(go.Scatter(
-                x=sdf['timestamp'], 
-                y=sdf['temperature'], 
-                name=lbl, 
-                mode='lines', 
-                connectgaps=False
-            ))
-
-        # 3. Grid and Dark Frame
-        for ts in pd.date_range(start=start_view, end=end_view, freq='6h'):
-            color, width = ("Black", 2) if (ts.weekday() == 0 and ts.hour == 0) else (("Gray", 1) if ts.hour == 0 else ("LightGray", 0.5))
-            fig.add_vline(x=ts, line_width=width, line_color=color, layer='below')
-
-        fig.update_xaxes(
-            showline=True, linewidth=2, linecolor='black', mirror=True,
-            gridcolor='Gainsboro'
-        )
-        fig.update_yaxes(
-            title="Temperature (°F)", 
-            range=[-20, 80], 
-            dtick=10,
-            showline=True, linewidth=2, linecolor='black', mirror=True,
-            gridcolor='Gainsboro',
-            minor=dict(dtick=5, showgrid=True, gridcolor='WhiteSmoke', gridwidth=0.5)
-        )
-        
-        fig.add_hline(y=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="Freezing (32°F)")
-        
-        # 4. Prevent Legend Cutoff
-        fig.update_layout(
-            plot_bgcolor='white', 
-            height=600, 
-            margin=dict(r=20, l=20, t=40, b=20),
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=1,
-                xanchor="left",
-                x=1.02,
-                font=dict(size=10)
-            ),
-            showlegend=True
-        )
-        return fig
+        return client.query(query).to_dataframe()
     except Exception as e:
-        st.error(f"Graph Error: {e}")
-        return go.Figure()
+        st.error(f"Database Connection Error: {e}")
+        return pd.DataFrame()
 
 ########################
-# --- MAIN CONTENT --- #
+# 3. GRAPHING ENGINE   #
 ########################
-st.header(f"📊 {PROJECT_TITLE}")
 
-if p_df.empty:
-    st.warning(f"No approved data found for Project {ACTIVE_PROJECT} in the last 84 days.")
+def build_custom_graph(df, title, lookback_weeks):
+    if df.empty:
+        return go.Figure().update_layout(title="No data currently approved.")
+
+    plot_df = df.copy()
+    # Apply the configured custom timezone
+    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(DISPLAY_TZ) 
+    
+    now_local = pd.Timestamp.now(tz=DISPLAY_TZ)
+    start_view = now_local - timedelta(weeks=lookback_weeks)
+
+    fig = go.Figure()
+
+    for loc in sorted(plot_df['Location'].unique()):
+        loc_data = plot_df[plot_df['Location'] == loc]
+        fig.add_trace(go.Scattergl(
+            x=loc_data['timestamp'], 
+            y=loc_data['temperature'], 
+            name=loc, 
+            mode='lines', 
+            connectgaps=False
+        ))
+
+    # Grid Hierarchy: Solid Black Mondays, Dotted Gray Midnights
+    grid_days = pd.date_range(start=start_view.floor('D'), end=now_local.ceil('D'), freq='D', tz=DISPLAY_TZ)
+    for ts in grid_days:
+        if ts.weekday() == 0:  # Monday
+            color, width, dash = "rgba(0,0,0,1)", 1.5, "solid"
+        else:  # Daily Midnight
+            color, width, dash = "rgba(128,128,128,0.5)", 1.0, "dot"
+        fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
+
+    # Add "Now" line and 32°F Reference
+    fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash", layer='above')
+    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F Freezing")
+
+    fig.update_layout(
+        title=f"<b>{title}</b>",
+        plot_bgcolor='white',
+        hovermode="x unified",
+        xaxis=dict(range=[start_view, now_local], showline=True, linecolor='black', mirror=True, tickformat='%b %d'),
+        yaxis=dict(title=UNIT_LABEL, gridcolor='Gainsboro', showline=True, linecolor='black', mirror=True, range=[-20, 80]),
+        height=550,
+        margin=dict(r=150)
+    )
+    return fig
+
+###########################
+# 4. MAIN UI LAYOUT       #
+###########################
+
+st.title(f"📊 {CLIENT_NAME}")
+st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ} | Current: {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%m/%d/%Y %H:%M')}")
+
+with st.sidebar:
+    st.header("Controls")
+    weeks = st.slider("Historical Window (Weeks)", 1, 12, 6)
+    if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+# Execute Data Fetch
+df = get_portal_data()
+
+if df.empty:
+    st.warning(f"No approved data found for project {TARGET_PROJECT}.")
 else:
-    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Project Data"])
-
+    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline", "📏 Profiles", "📋 Table"])
+    
     with tab_time:
-        weeks = st.select_slider("Weeks to View", options=[1, 2, 4, 6, 8, 12], value=6)
-        now = pd.Timestamp.now(tz=pytz.UTC)
-        end_view = (now + pd.Timedelta(days=(7 - now.weekday()) % 7 or 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        start_view = end_view - timedelta(weeks=weeks)
-        
-        for loc in sorted(p_df['Location'].dropna().unique()):
-            with st.expander(f"📈 {loc}", expanded=True):
-                loc_data = p_df[(p_df['Location'] == loc) & (p_df['timestamp'] >= start_view)]
-                # Wrap the chart in a bordered container for the frame
-                with st.container(border=True):
-                    st.plotly_chart(
-                        build_standard_sf_graph(loc_data, start_view, end_view), 
-                        use_container_width=True, 
-                        key=f"t_{loc}"
-                    )
+        for loc in sorted(df['Location'].unique()):
+            with st.expander(f"📍 {loc}", expanded=True):
+                st.plotly_chart(build_custom_graph(df[df['Location'] == loc], loc, weeks), use_container_width=True)
 
-    # 2. DEPTH PROFILE TAB
     with tab_depth:
-        depth_only = p_df.dropna(subset=['Depth_Num', 'NodeNum']).copy()
+        # Depth profile logic
+        df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
+        depth_only = df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} Depth Profile", expanded=True):
-                loc_data = depth_only[depth_only['Location'] == loc]
+            with st.expander(f"📏 {loc} - Weekly Snapshots"):
                 fig_d = go.Figure()
-                mondays = pd.date_range(start=start_view, end=now, freq='W-MON')
-                
-                for target_ts in [m.replace(hour=6) for m in mondays]:
-                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(days=1)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(days=1))]
+                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
+                for m_date in mondays:
+                    target_ts = m_date.replace(hour=6, minute=0)
+                    window = depth_only[(depth_only['Location'] == loc) & (depth_only['timestamp'].between(target_ts-timedelta(hours=12), target_ts+timedelta(hours=12)))]
                     if not window.empty:
-                        snaps = [window[window['NodeNum']==n].sort_values(by='timestamp', key=lambda x: (x-target_ts).abs()).iloc[0] for n in window['NodeNum'].unique()]
-                        snap_df = pd.DataFrame(snaps).sort_values('Depth_Num')
-                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%Y')))
-                
-                y_limit = int(((loc_data['Depth_Num'].max() // 5) + 1) * 5)
-                
-                # --- X-AXIS (Temperature) ---
-                fig_d.update_xaxes(
-                    title="Temperature (°F)", 
-                    range=[-20, 80], 
-                    dtick=10,
-                    showline=True, linewidth=2, linecolor='black', mirror=True,
-                    showgrid=True, 
-                    gridcolor='Gray',
-                    minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
-                )
-                
-                # --- Y-AXIS (Depth in feet) ---
-                fig_d.update_yaxes(
-                    title="Depth (feet)", 
-                    range=[y_limit, 0], 
-                    dtick=10,
-                    showline=True, linewidth=2, linecolor='black', mirror=True,
-                    showgrid=True, 
-                    gridcolor='Gray',
-                    minor=dict(dtick=5, showgrid=True, gridcolor='Gainsboro', gridwidth=0.5)
-                )
+                        snap_df = (window.assign(d=(window['timestamp']-target_ts).abs()).sort_values(['NodeNum','d']).drop_duplicates('NodeNum').sort_values('Depth_Num'))
+                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], name=m_date.strftime('%m/%d'), mode='lines+markers'))
+                fig_d.update_layout(yaxis=dict(autorange="reversed", title="Depth (ft)"), xaxis=dict(title=UNIT_LABEL), height=600)
+                st.plotly_chart(fig_d, use_container_width=True)
 
-                # Layout Adjustment to prevent legend cutoff
-                fig_d.update_layout(
-                    plot_bgcolor='white', 
-                    height=700,
-                    margin=dict(r=150), # Space for legend
-                    legend=dict(x=1.05, y=1)
-                )
-                
-                
-                # Vertical Freezing Reference
-                fig_d.add_vline(x=FREEZING_LINE, line_dash="dash", line_color="RoyalBlue", line_width=2.5)
-
-                fig_d.update_layout(plot_bgcolor='white', height=700)
-                
-                # Framed Container for the graph
-                with st.container(border=True):
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"d_{loc}")
-                    
-   # 3. PROJECT DATA TAB
     with tab_table:
-        # 1. Get the latest reading for each sensor
-        latest = p_df.sort_values('timestamp').groupby('NodeNum').tail(1).copy()
-        
-        # 2. Format the Temperature and Position columns
-        latest['Temperature'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
-        latest['Position'] = latest.apply(
-            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
-            else (f"{r['Depth']} ft" if pd.notnull(r['Depth']) else "N/A"), 
-            axis=1
-        )
-        
-        # Rename NodeNum for the heading
-        latest['Sensor ID'] = latest['NodeNum']
-
-        # 3. Create a numeric sorting helper for Position 
-        # (This ensures '2 ft' comes before '10 ft')
-        latest['pos_numeric'] = pd.to_numeric(latest['Position'].str.extract('(\d+)', expand=False), errors='coerce')
-
-        # 4. Sort by Location (A-Z) and then by our numeric Position helper
-        latest_sorted = latest.sort_values(by=['Location', 'pos_numeric'], ascending=[True, True])
-
-        # 5. Display the table with full-word headings
-        st.dataframe(
-            latest_sorted[['Location', 'Position', 'Temperature', 'Sensor ID']], 
-            use_container_width=True, 
-            hide_index=True
-        )
+        latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        latest['Last Sync'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
+        st.dataframe(latest[['Location', 'Depth', 'temperature', 'Last Sync']].sort_values(['Location', 'Depth']), use_container_width=True, hide_index=True)
