@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 TARGET_PROJECT = "2527"
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-# Use the master metadata table for all 114 nodes
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
@@ -33,7 +32,6 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# Global Client Initialization
 client = get_bq_client()
 
 PROJECT_VISIBILITY_MASKS = {
@@ -46,12 +44,6 @@ PROJECT_VISIBILITY_MASKS = {
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    """
-    Robust Data Engine:
-    - Casts project to string for comparison
-    - Handles case-insensitive 'TRUE'/'True' logic
-    - Allows 'Pending' (NULL) data so nodes don't vanish
-    """
     if client is None: return pd.DataFrame()
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
@@ -78,7 +70,6 @@ def get_universal_portal_data(project_id):
     """
     try:
         df = client.query(query).to_dataframe()
-        # Clean metadata strings to prevent labeling errors
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
         return df
@@ -96,7 +87,6 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Priority Labeling: Bank -> Depth -> NodeID
     def create_label(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b: return f"Bank {b} ({r['NodeNum']})"
@@ -109,17 +99,16 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # Relaxed Gap Detection for sparse 2527 data
+        # GAP DETECTION: Reverted to 6.0 hours
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 48.0
+        gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # Using go.Scatter (SVG) instead of Scattergl for more stable initial rendering
-        # connectgaps=True bridges 'invisible' segments
+        # Using go.Scatter + connectgaps=True + markers to ensure visibility
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines+markers', 
@@ -136,7 +125,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         height=600, 
         margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1),
-        autosize=True # Forces Plotly to try and fill the container
+        autosize=True 
     )
     return fig
 
@@ -147,18 +136,13 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 st.title(f"📊 Project {TARGET_PROJECT} Status")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 
-# Use a container to hold the data fetch
-with st.spinner("Fetching Elizabeth Project Streams..."):
-    data = get_universal_portal_data(TARGET_PROJECT)
+data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
     locs = sorted(data['Location'].unique())
     for loc in locs:
-        # Expanding the container helps Plotly calculate width correctly
         with st.expander(f"📍 Location: {loc}", expanded=True):
             loc_df = data[data['Location'] == loc]
-            
-            # Localize window boundaries
             now_utc = pd.Timestamp.now(tz='UTC')
             
             fig = build_high_speed_graph(
@@ -168,8 +152,6 @@ if not data.empty:
                 now_utc, 
                 "America/New_York"
             )
-            
-            # Using width='stretch' for new 2026 Streamlit standards
             st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
 else:
-    st.info("No data found for Project 2527. Checking database for latest pings...")
+    st.info("Loading streams...")
