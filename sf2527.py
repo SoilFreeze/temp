@@ -83,6 +83,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
+        -- CHANGED: Use a LEFT JOIN so data isn't deleted if the timestamp join is missing
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
