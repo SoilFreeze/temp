@@ -53,7 +53,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Must be Approved (TRUE) AND NOT Masked
+        # Must be Approved (TRUE) AND NOT Masked 
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -65,6 +65,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
+        # Engineering view logic [cite: 16]
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -77,21 +78,20 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        -- CHANGE: Changed to LEFT JOIN so missing hourly entries don't break the graph 
+        -- USING LEFT JOIN: Prevents data loss if timestamp entry is missing 
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{project_id}'
+        WHERE (m.Project = '{project_id}' OR m.Project LIKE '2527%')
         {query_filter}
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
-        ORDER BY m.Location ASC, r.timestamp ASC
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+        ORDER BY r.timestamp ASC
     """
     try:
         return client.query(query).to_dataframe()
     except Exception as e:
-        st.error(f"BQ Error: {e}")
+        st.error(f"Database Query Error: {e}")
         return pd.DataFrame()
-
 
 ########################
 # 3. GRAPHING ENGINE   #
