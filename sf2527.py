@@ -106,32 +106,18 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
 
 # Added active_refs, unit_mode, and unit_label to the parameters
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz):
-    if df.empty: return go.Figure().update_layout(title="No data available.")
+    # ... (keep existing setup code) ...
 
-    pdf = df.copy()
-    
-    # Unit Conversion Logic
-    if unit_mode == "Celsius":
-        pdf['temperature'] = (pdf['temperature'] - 32) * 5/9
-        freezing_line = 0
-    else:
-        freezing_line = 32
+    # 1. FIX: Use 'lines+markers' so sparse Bank data remains visible even if gaps exist
+    plot_mode = 'lines+markers' if len(pdf) < 5000 else 'lines'
 
-    pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
-    
-    # LEGEND LOGIC: Include Bank and Depth [cite: 6, 9]
-    pdf['label'] = pdf.apply(
-        lambda r: f"Bank {r['Bank']} ({r['NodeNum']})" if pd.notnull(r['Bank']) and str(r['Bank']).strip().lower() not in ["", "none", "nan", "null"]
-        else f"{r.get('Depth', '??')}ft ({r.get('NodeNum')})", axis=1
-    )
-    
-    fig = go.Figure()
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # GAP DETECTION: Break lines if > 6 hours
+        # 2. FIX: Increase gap threshold to 24 hours for sparse Elizabeth data
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 6.0
+        gap_mask = s_df['gap_hrs'] > 24.0 # Increased from 6.0
+        
         if gap_mask.any():
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
@@ -140,8 +126,9 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines', connectgaps=False
+            name=lbl, mode=plot_mode, connectgaps=False # Using the dynamic plot_mode
         ))
+
 
     # Grid Hierarchy (Monday lines vs Daily lines)
     grid_days = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
