@@ -52,17 +52,9 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    ULTRA-ROBUST FILTER:
-    1. Casts Project to STRING to prevent TypeErrors.
-    2. Uses TRIM to handle hidden spaces.
-    3. Handles Case-Insensitive 'TRUE'/'True'.
-    """
     if client is None: return pd.DataFrame()
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
-    
-    # Force project_id to string for the query
     target_pid = str(project_id).strip()
 
     if view_mode == "client":
@@ -71,7 +63,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             AND (UPPER(CAST(rej.approve AS STRING)) = 'TRUE' OR rej.approve IS NULL)
             AND NOT EXISTS (
                 SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-                WHERE m.NodeNum = r.NodeNum 
+                WHERE UPPER(TRIM(m.NodeNum)) = UPPER(TRIM(r.NodeNum)) 
                 AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
                 AND UPPER(CAST(m.approve AS STRING)) = 'MASKED'
             )
@@ -88,28 +80,21 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             UNION ALL
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
+        INNER JOIN `{METADATA_TABLE}` AS m 
+            ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))  -- FORCED CASE MATCH
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
-            ON r.NodeNum = rej.NodeNum 
+            ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(rej.NodeNum)) 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE CAST(m.Project AS STRING) LIKE '{target_pid}%'
+        WHERE UPPER(TRIM(CAST(m.Project AS STRING))) = UPPER('{target_pid}')
         {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        # Standardize the conversion to dataframe
-        df = client.query(query).to_dataframe()
-        
-        # FINAL FAILSAFE: If BigQuery returned 'True' as a boolean, convert to string
-        if not df.empty and 'is_approved' in df.columns:
-            df['is_approved'] = df['is_approved'].astype(str).str.upper()
-            
-        return df
+        return client.query(query).to_dataframe()
     except Exception as e:
         st.error(f"BQ Error: {e}")
         return pd.DataFrame()
-
 ########################
 # 3. GRAPHING ENGINE   #
 ########################
