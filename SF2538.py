@@ -9,37 +9,27 @@ import pytz
 #################################################################
 # 1. CONFIGURATION: Change these for each project deployment    #
 #################################################################
-TARGET_PROJECT = "2538"             
+TARGET_PROJECT = "2538"             # Matches the 'Project' column in metadata
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
-DISPLAY_TZ = "US/Pacific"           
+DISPLAY_TZ = "US/Pacific"           # Set your custom timezone
 UNIT_LABEL = "°F"                   
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-# Using your snapshot table to bypass Drive permission issues
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" #
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" #
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
 @st.cache_resource
 def get_bq_client():
-    """
-    Returns a BigQuery client using Streamlit Secrets.
-    Includes scopes for BigQuery and Drive access.
-    """
     try:
         if "gcp_service_account" in st.secrets:
-            # Load credentials from the [gcp_service_account] section of secrets.toml
             info = st.secrets["gcp_service_account"]
-            # Pull the scopes you defined in your secrets
             SCOPES = st.secrets.get("scopes", ["https://www.googleapis.com/auth/bigquery"])
-            
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
-        
-        # Fallback for local development using gcloud CLI auth
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
@@ -53,12 +43,10 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_portal_data():
-    """
-    Queries only approved data for the specific project.
-    """
     if client is None:
         return pd.DataFrame()
 
+    # Optimized Query: Joins raw data to metadata and filters by the status in manual_rejections
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -69,17 +57,12 @@ def get_portal_data():
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+        INNER JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{TARGET_PROJECT}'
-        AND (rej.approve = 'TRUE') 
-        AND NOT EXISTS (
-            SELECT 1 FROM `{OVERRIDE_TABLE}` m2 
-            WHERE m2.NodeNum = r.NodeNum 
-            AND m2.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-            AND m2.approve = 'MASKED'
-        )
+        WHERE TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}'
+        AND rej.approve = 'TRUE'  -- Only pull readings explicitly marked TRUE
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY r.timestamp ASC
     """
     try:
@@ -94,7 +77,7 @@ def get_portal_data():
 
 def build_custom_graph(df, title, lookback_weeks):
     if df.empty:
-        return go.Figure().update_layout(title="No data currently approved.")
+        return go.Figure().update_layout(title="No approved data found.")
 
     plot_df = df.copy()
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(DISPLAY_TZ) 
@@ -111,14 +94,14 @@ def build_custom_graph(df, title, lookback_weeks):
             name=loc, mode='lines', connectgaps=False
         ))
 
-    # Engineering Grid Hierarchy
+    # Grid Hierarchy: Black Mondays, Dotted Gray Midnights
     grid_days = pd.date_range(start=start_view.floor('D'), end=now_local.ceil('D'), freq='D', tz=DISPLAY_TZ)
     for ts in grid_days:
         color, width, dash = ("rgba(0,0,0,1)", 1.2, "solid") if ts.weekday() == 0 else ("rgba(128,128,128,0.4)", 0.8, "dot")
         fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
 
     fig.add_vline(x=now_local, line_width=2, line_color="Red", line_dash="dash")
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F")
+    fig.add_hline(y=32.0, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F Freezing")
 
     fig.update_layout(
         title=f"<b>{title}</b>", plot_bgcolor='white', hovermode="x unified",
@@ -133,12 +116,12 @@ def build_custom_graph(df, title, lookback_weeks):
 ###########################
 
 st.title(f"📊 {CLIENT_NAME}")
-st.caption(f"Project {TARGET_PROJECT} | Timezone: {DISPLAY_TZ}")
+st.caption(f"Project ID: {TARGET_PROJECT} | Current Time ({DISPLAY_TZ}): {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%m/%d %H:%M')}")
 
 with st.sidebar:
-    st.header("Controls")
-    weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
-    if st.button("🔄 Refresh Data"):
+    st.header("Settings")
+    weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
+    if st.button("🔄 Refresh Cache"):
         st.cache_data.clear()
         st.rerun()
 
@@ -146,20 +129,20 @@ df = get_portal_data()
 
 if df.empty:
     st.warning(f"No approved data found for project {TARGET_PROJECT}.")
+    st.info("Ensure the 'Project' column in metadata_snapshot exactly matches the ID above and that data is marked 'TRUE' in the rejections table.")
 else:
-    tab1, tab2, tab3 = st.tabs(["📈 Timeline", "📏 Profiles", "📋 Table"])
+    t1, t2, t3 = st.tabs(["📈 Timeline", "📏 Vertical Profiles", "📋 Table"])
     
-    with tab1:
+    with t1:
         for loc in sorted(df['Location'].unique()):
             with st.expander(f"📍 {loc}", expanded=True):
                 st.plotly_chart(build_custom_graph(df[df['Location'] == loc], loc, weeks), use_container_width=True)
 
-    with tab2:
-        # Vertical depth snapshot logic
+    with t2:
         df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
         depth_only = df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} - Weekly Snapshots"):
+            with st.expander(f"📏 {loc} - Snapshots"):
                 fig_d = go.Figure()
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 for m_date in mondays:
@@ -168,10 +151,10 @@ else:
                     if not window.empty:
                         snap = (window.assign(d=(window['timestamp']-target).abs()).sort_values(['NodeNum','d']).drop_duplicates('NodeNum').sort_values('Depth_Num'))
                         fig_d.add_trace(go.Scatter(x=snap['temperature'], y=snap['Depth_Num'], name=m_date.strftime('%m/%d'), mode='lines+markers'))
-                fig_d.update_layout(yaxis=dict(autorange="reversed", title="Depth (ft)"), xaxis=dict(title=UNIT_LABEL), height=600)
+                fig_d.update_layout(yaxis=dict(autorange="reversed", title="Depth (ft)"), xaxis=dict(title=UNIT_LABEL), height=600, plot_bgcolor='white')
                 st.plotly_chart(fig_d, use_container_width=True)
 
-    with tab3:
+    with t3:
         latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Last Sync'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%m/%d %H:%M')
         st.dataframe(latest[['Location', 'Depth', 'temperature', 'Last Sync']].sort_values(['Location', 'Depth']), use_container_width=True, hide_index=True)
