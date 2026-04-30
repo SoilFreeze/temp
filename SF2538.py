@@ -178,67 +178,47 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header(f"📊 Project Status: {selected_project}")
-    global client
 
     if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
+        st.info("💡 Please select a specific project.")
         return
     
     with st.spinner("Loading approved data..."):
-        # The portal specifically filters for manual_rejections.status = 'TRUE' [cite: 15, 16]
-        p_df = get_universal_portal_data(selected_project, view_mode="client")
+        # The portal specifically filters for 'TRUE' and excludes 'MASKED' [cite: 15, 16]
+        df = get_universal_portal_data(selected_project, view_mode="client")
     
-    # DEBUG: Help identify if data exists but is being filtered out later
-    if not p_df.empty:
-        st.caption(f"✅ Found {len(p_df)} approved records for {selected_project}.")
-    else:
-        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}. Check the Admin Tools.")
+    if df.empty:
+        st.warning(f"⚠️ No approved data found for {selected_project}.")
         return
 
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
-        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="client_weeks_slider")
+        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="portal_weeks_slider")
         end_view = pd.Timestamp.now(tz='UTC')
         start_view = end_view - timedelta(weeks=weeks_view)
         
-        # Performance: Pre-sort locations
-        locations = sorted(p_df['Location'].dropna().unique())
-        
-        if not locations:
-            st.error("Data loaded, but no 'Location' metadata was found to group the charts.")
-        
+        locations = sorted(df['Location'].dropna().unique())
         for loc in locations:
             with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
-                loc_data = p_df[p_df['Location'] == loc].copy()
-                
-                # Check if this specific location has data in the selected time window
-                if loc_data.empty:
-                    st.write("No data available for this specific location.")
-                    continue
-
+                loc_data = df[df['Location'] == loc].copy()
                 fig = build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"{loc} Approved Data", 
-                    start_view=start_view, 
-                    end_view=end_view, 
-                    active_refs=tuple(active_refs), 
-                    unit_mode=unit_mode, 
-                    unit_label=unit_label, 
-                    display_tz=display_tz 
+                    loc_data, f"{loc} Approved Data", 
+                    start_view, end_view, 
+                    active_refs, unit_mode, unit_label, display_tz
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
 
     with tab_depth:
         st.subheader("📏 Vertical Temperature Profile")
-        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce') [cite: 6, 9]
-        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy() [cite: 15]
+        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
+        df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce') 
+        depth_only = df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         for loc in sorted(depth_only['Location'].unique()):
             with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
-                
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 
                 for m_date in mondays:
@@ -247,81 +227,47 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
                                       (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     
                     if not window.empty:
-                        snap_df = (
-                            window.assign(diff=(window['timestamp'] - target_ts).abs())
-                            .sort_values(['NodeNum', 'diff'])
-                            .drop_duplicates('NodeNum')
-                            .sort_values('Depth_Num')
-                        ) [cite: 14, 15]
+                        snap_df = (window.assign(diff=(window['timestamp'] - target_ts).abs())
+                                   .sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num'))
                         
                         conv_temps = snap_df['temperature'].apply(
                             lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
                         )
                         
-                        fig_d.add_trace(go.Scatter(
-                            x=conv_temps, 
-                            y=snap_df['Depth_Num'], 
-                            mode='lines+markers', 
-                            name=target_ts.strftime('%m/%d/%y'),
-                            line=dict(shape='spline', smoothing=0.5)
-                        ))
+                        fig_d.add_trace(go.Scatter(x=conv_temps, y=snap_df['Depth_Num'], 
+                                                 mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
+                                                 line=dict(shape='spline', smoothing=0.5)))
 
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                
                 fig_d.update_layout(
                     plot_bgcolor='white', height=600,
-                    # TEMPERATURE AXIS (X)
                     xaxis=dict(
-                        title=f"Temp ({unit_label})",
-                        range=[-20, 80],
-                        # Major Grid: Every 20 degrees
-                        dtick=20,
-                        gridcolor='Gainsboro', 
-                        gridwidth=1.2,
-                        # Minor Grid: Every 5 degrees
+                        title=f"Temp ({unit_label})", range=[-20, 80], dtick=20,
+                        gridcolor='Gainsboro', gridwidth=1.2,
                         minor=dict(dtick=5, gridcolor='whitesmoke', gridwidth=0.8),
                         showline=True, linecolor='black', mirror=True
                     ),
-                    # DEPTH AXIS (Y)
                     yaxis=dict(
-                        title="Depth (ft)",
-                        range=[y_limit, 0],
-                        # Major Grid: Every 10 feet
-                        dtick=10,
-                        gridcolor='Silver',
-                        gridwidth=1.2,
-                        # Minor Grid: Every 2.5 feet
+                        title="Depth (ft)", range=[y_limit, 0], dtick=10,
+                        gridcolor='Silver', gridwidth=1.2,
                         minor=dict(dtick=2.5, gridcolor='whitesmoke', gridwidth=0.8),
                         showline=True, linecolor='black', mirror=True
                     ),
                     legend=dict(orientation="h", y=-0.2)
                 )
-                
-                # Freezing Reference Line matching the Time Graph style
-                freezing_val = 0 if unit_mode == "Celsius" else 32
-                fig_d.add_vline(x=freezing_val, line_dash="dash", line_color="RoyalBlue")
-                
-                st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
+                # Freezing Line
+                f_val = 0 if unit_mode == "Celsius" else 32
+                fig_d.add_vline(x=f_val, line_dash="dash", line_color="RoyalBlue")
+                st.plotly_chart(fig_d, use_container_width=True, key=f_graph_{loc})
 
     with tab_table:
-        # Latest Snapshot Table (Fastest way to group latest data)
-        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
-        # Efficient vector conversion
+        latest = df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(
-            lambda x: f"{round((x - 32) * 5/9 if unit_mode == 'Celsius' else x, 1)}{unit_label}"
+            lambda x: f"{round((x-32)*5/9 if unit_mode=='Celsius' else x, 1)}{unit_label}"
         )
-        
-        latest['Position'] = latest.apply(
-            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
-            else f"{r.get('Depth', '??')} ft", axis=1
-        )
-        
-        st.dataframe(
-            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
-            use_container_width=True, 
-            hide_index=True
-        )
+        latest['Last Sync'] = latest['timestamp'].dt.tz_convert(display_tz).dt.strftime('%m/%d %H:%M')
+        st.dataframe(latest[['Location', 'Depth', 'Current Temp', 'Last Sync']].sort_values(['Location', 'Depth']), 
+                     use_container_width=True, hide_index=True)
 
 ###########################
 # 4. MAIN UI LAYOUT       #
