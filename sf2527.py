@@ -63,7 +63,7 @@ def get_standalone_portal_data():
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE (TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}' 
-               OR m.Project LIKE '2538%')
+               OR m.Project LIKE '2527%')
         AND rej.approve = 'TRUE' -- STRICT TRUE FILTER
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY r.timestamp ASC
