@@ -4,26 +4,27 @@ import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
-import pytz
 
 #################################################################
-# 1. CONFIGURATION: Change these for each project deployment    #
+# 1. CONFIGURATION: Update these for each project deployment   #
 #################################################################
-TARGET_PROJECT = "2538"             # Matches the 'Project' column in metadata
+TARGET_PROJECT = "2538"             # Must match 'Project' column in metadata_snapshot
 CLIENT_NAME = "Pump 16 Upgrade"     
 LOCATION_STAMP = "Ferndale, WA"     
-DISPLAY_TZ = "America/Los_Angeles"         # Set your custom timezone
+DISPLAY_TZ = "America/Los_Angeles"  # Modern IANA name for US/Pacific compatibility
 UNIT_LABEL = "°F"                   
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" #
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections" #
+# Tables confirmed in your screenshots
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
 @st.cache_resource
 def get_bq_client():
+    """Returns BigQuery client using Streamlit Secrets for cloud deployment."""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -43,10 +44,14 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_portal_data():
+    """
+    Core Logic:
+    1. Gets project association from metadata_snapshot.
+    2. Filters for 'TRUE' approval from manual_rejections.
+    """
     if client is None:
         return pd.DataFrame()
 
-    # Optimized Query: Joins raw data to metadata and filters by the status in manual_rejections
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -61,8 +66,8 @@ def get_portal_data():
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
         WHERE TRIM(CAST(m.Project AS STRING)) = '{TARGET_PROJECT}'
-        AND rej.approve = 'TRUE'  -- Only pull readings explicitly marked TRUE
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+        AND rej.approve = 'TRUE'
+        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY r.timestamp ASC
     """
     try:
@@ -77,7 +82,7 @@ def get_portal_data():
 
 def build_custom_graph(df, title, lookback_weeks):
     if df.empty:
-        return go.Figure().update_layout(title="No approved data found.")
+        return go.Figure().update_layout(title="No data currently approved.")
 
     plot_df = df.copy()
     plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(DISPLAY_TZ) 
@@ -86,7 +91,6 @@ def build_custom_graph(df, title, lookback_weeks):
     start_view = now_local - timedelta(weeks=lookback_weeks)
 
     fig = go.Figure()
-
     for loc in sorted(plot_df['Location'].unique()):
         loc_data = plot_df[plot_df['Location'] == loc]
         fig.add_trace(go.Scattergl(
@@ -94,7 +98,7 @@ def build_custom_graph(df, title, lookback_weeks):
             name=loc, mode='lines', connectgaps=False
         ))
 
-    # Grid Hierarchy: Black Mondays, Dotted Gray Midnights
+    # Grid Hierarchy: Solid Black Mondays, Dotted Gray Midnights
     grid_days = pd.date_range(start=start_view.floor('D'), end=now_local.ceil('D'), freq='D', tz=DISPLAY_TZ)
     for ts in grid_days:
         color, width, dash = ("rgba(0,0,0,1)", 1.2, "solid") if ts.weekday() == 0 else ("rgba(128,128,128,0.4)", 0.8, "dot")
@@ -116,6 +120,8 @@ def build_custom_graph(df, title, lookback_weeks):
 ###########################
 
 st.title(f"📊 {CLIENT_NAME}")
+
+# Timezone-safe caption
 try:
     now_ts = pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%m/%d %H:%M')
 except Exception:
@@ -125,8 +131,8 @@ st.caption(f"Project ID: {TARGET_PROJECT} | Current Time: {now_ts}")
 
 with st.sidebar:
     st.header("Settings")
-    weeks = st.slider("Lookback (Weeks)", 1, 12, 4)
-    if st.button("🔄 Refresh Cache"):
+    weeks = st.slider("Lookback (Weeks)", 1, 12, 6)
+    if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
@@ -134,7 +140,6 @@ df = get_portal_data()
 
 if df.empty:
     st.warning(f"No approved data found for project {TARGET_PROJECT}.")
-    st.info("Ensure the 'Project' column in metadata_snapshot exactly matches the ID above and that data is marked 'TRUE' in the rejections table.")
 else:
     t1, t2, t3 = st.tabs(["📈 Timeline", "📏 Vertical Profiles", "📋 Table"])
     
@@ -147,7 +152,7 @@ else:
         df['Depth_Num'] = pd.to_numeric(df['Depth'], errors='coerce')
         depth_only = df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} - Snapshots"):
+            with st.expander(f"📏 {loc} - Weekly Snapshots"):
                 fig_d = go.Figure()
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
                 for m_date in mondays:
