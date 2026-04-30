@@ -22,20 +22,23 @@ OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
+# In Section 1 of your script
 @st.cache_resource
 def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            SCOPES = st.secrets.get("scopes", ["https://www.googleapis.com/auth/bigquery"])
+            # REQUIRED: You must add the drive scope here to access tables linked to Google Sheets
+            SCOPES = [
+                "https://www.googleapis.com/auth/bigquery",
+                "https://www.googleapis.com/auth/drive.readonly" # Added this
+            ]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
         return None
-
-client = get_bq_client()
 
 ############################
 # 2. DATA ENGINE LOGIC     #
@@ -270,20 +273,17 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 st.title(f"📊 {CLIENT_NAME}")
 st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ}")
 
-# FIX: Define the cutoffs dictionary (required by your get_universal_portal_data)
+# Ensure this is defined so the query doesn't fail on 'cutoff'
 PROJECT_VISIBILITY_MASKS = {
     "2538-Ferndale": "2024-01-01 00:00:00" 
 }
 
-# FIX: Call the correct function name with the client view mode
-p_df = get_universal_portal_data(TARGET_PROJECT, view_mode="client")
-
-# Call the UI function
-# NOTE: Ensure the parameters match your render_client_portal definition
+# The NameError is fixed by calling the function defined in Section 2
+# This will now work once the 'Drive' scopes are added to Section 1
 render_client_portal(
     selected_project=TARGET_PROJECT, 
     display_tz=DISPLAY_TZ, 
-    unit_mode="Fahrenheit", # or "Celsius"
+    unit_mode="Fahrenheit", 
     unit_label=UNIT_LABEL, 
     active_refs=[]
 )
