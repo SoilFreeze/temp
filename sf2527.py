@@ -48,17 +48,12 @@ client = get_bq_client()
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
-    """
-    STRICT CLIENT FILTER: 
-    1. Only pulls data where approve = 'TRUE'[cite: 15].
-    2. Explicitly EXCLUDES any data marked as 'MASKED' for that hour.
-    """
     if client is None: return pd.DataFrame()
 
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Strict logic: Must be Approved (TRUE) AND NOT Masked
+        # Must be Approved (TRUE) AND NOT Masked
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -70,7 +65,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering view sees all non-deleted data [cite: 16]
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -83,7 +77,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        -- CHANGED: Use a LEFT JOIN so data isn't deleted if the timestamp join is missing
+        -- CHANGE: Changed to LEFT JOIN so missing hourly entries don't break the graph 
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
@@ -93,11 +87,12 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        # Ensure the query is processed as a string with no hidden array formatting
         return client.query(query).to_dataframe()
     except Exception as e:
         st.error(f"BQ Error: {e}")
         return pd.DataFrame()
+
+
 ########################
 # 3. GRAPHING ENGINE   #
 ########################
