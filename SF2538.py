@@ -9,12 +9,32 @@ import pytz
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
+TARGET_PROJECT = "2538-Ferndale"    
+CLIENT_NAME = "Pump 16 Upgrade"     
+LOCATION_STAMP = "Ferndale, WA"     
+DISPLAY_TZ = "America/Los_Angeles"  
+UNIT_LABEL = "°F"                   
+
+PROJECT_ID = "sensorpush-export"
+DATASET_ID = "Temperature"
+
+# Updated to use the snapshot table as requested
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+# This dictionary is required by your get_universal_portal_data function
+PROJECT_VISIBILITY_MASKS = {
+    "2538-Ferndale": "2024-01-01 00:00:00" 
+}
+
+st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
+
 @st.cache_resource
 def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # REQUIRED: Add Drive scope to access metadata and override tables
+            # CRITICAL: Includes Drive scope to resolve the 403 Permission error
             SCOPES = [
                 "https://www.googleapis.com/auth/bigquery",
                 "https://www.googleapis.com/auth/drive.readonly"
