@@ -50,10 +50,13 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, view_mode="engineering"):
     if client is None: return pd.DataFrame()
 
+    # Extracts the leading number (e.g., '2527') to prevent string mismatch
+    proj_number = "".join(filter(str.isdigit, project_id))[:4]
+    
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # Must be Approved (TRUE) AND NOT Masked 
+        # Strict logic: Must be Approved (TRUE) AND NOT Masked
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
             AND rej.approve = 'TRUE'
@@ -65,7 +68,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering view logic [cite: 16]
+        # Engineering view logic
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -78,11 +81,11 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
-        -- USING LEFT JOIN: Prevents data loss if timestamp entry is missing 
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE (m.Project = '{project_id}' OR m.Project LIKE '2527%')
+        -- FIX: Use a wildcard match to catch "2527-Elizabeth" regardless of suffix
+        WHERE m.Project LIKE '{proj_number}%'
         {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
         ORDER BY r.timestamp ASC
