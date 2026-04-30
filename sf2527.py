@@ -58,17 +58,18 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-    # Change: Allow 'TRUE' OR NULL (New/Pending data)
-        query_filter = f"""
-            AND r.timestamp >= '{cutoff}'
-            AND (rej.approve = 'TRUE' OR rej.approve IS NULL) 
-            AND NOT EXISTS (
-                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-                WHERE m.NodeNum = r.NodeNum 
-                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-                AND m.approve = 'MASKED'
-            )
-        """
+    # MODIFIED: Removed strict 'TRUE' requirement to allow new data to show
+    # Added a check that allows NULL (Pending) data
+    query_filter = f"""
+        AND r.timestamp >= '{cutoff}'
+        AND (rej.approve = 'TRUE' OR rej.approve IS NULL) 
+        AND NOT EXISTS (
+            SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+            WHERE m.NodeNum = r.NodeNum 
+            AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+            AND m.approve = 'MASKED'
+        )
+    """
     else:
         # Engineering view sees all non-deleted data [cite: 16]
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
