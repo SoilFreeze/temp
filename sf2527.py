@@ -49,28 +49,32 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    STRICT CLIENT FILTER: 
-    1. Only pulls data where approve = 'TRUE'[cite: 15].
-    2. Explicitly EXCLUDES any data marked as 'MASKED' for that hour.
+    MODIFIED CLIENT FILTER: 
+    Allows 'Approved' OR 'Pending' (NULL) data to ensure 114 nodes stay visible.
+    Still explicitly EXCLUDES any data marked as 'MASKED'.
     """
     if client is None: return pd.DataFrame()
 
+    # Get the visibility cutoff for the specific project
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
-    # MODIFIED: Removed strict 'TRUE' requirement to allow new data to show
-    # Added a check that allows NULL (Pending) data
-    query_filter = f"""
-        AND r.timestamp >= '{cutoff}'
-        AND (rej.approve = 'TRUE' OR rej.approve IS NULL) 
-        AND NOT EXISTS (
-            SELECT 1 FROM `{OVERRIDE_TABLE}` m 
-            WHERE m.NodeNum = r.NodeNum 
-            AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
-            AND m.approve = 'MASKED'
-        )
-    """
+    if view_mode == "client":
+        # UPDATED LOGIC:
+        # 1. Must be after the project cutoff date.
+        # 2. Allows 'TRUE' (Approved) OR NULL (Pending/New data).
+        # 3. NOT EXISTS still blocks specific hours marked as 'MASKED'.
+        query_filter = f"""
+            AND r.timestamp >= '{cutoff}'
+            AND (rej.approve = 'TRUE' OR rej.approve IS NULL)
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
+            )
+        """
     else:
-        # Engineering view sees all non-deleted data [cite: 16]
+        # Engineering view sees all non-deleted data
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -92,7 +96,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         ORDER BY m.Location ASC, r.timestamp ASC
     """
     try:
-        # Ensure the query is processed as a string with no hidden array formatting
         return client.query(query).to_dataframe()
     except Exception as e:
         st.error(f"BQ Error: {e}")
