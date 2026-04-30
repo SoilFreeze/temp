@@ -17,8 +17,14 @@ UNIT_LABEL = "°F"
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot"
+# UPDATED: Using the master metadata table for all 114 nodes
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata"
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+PROJECT_VISIBILITY_MASKS = {
+    "2527": "2026-01-01 00:00:00",
+    "2538-Ferndale": "2024-01-01 00:00:00" 
+}
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
@@ -27,7 +33,6 @@ def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # REQUIRED: BigQuery + Drive Read-Only Scopes
             SCOPES = [
                 "https://www.googleapis.com/auth/bigquery",
                 "https://www.googleapis.com/auth/drive.readonly"
@@ -39,7 +44,6 @@ def get_bq_client():
         st.error(f"Authentication Failed: {e}")
         return None
 
-# CRITICAL: Re-initialize the client variable
 client = get_bq_client()
 
 ############################
@@ -49,23 +53,19 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, view_mode="engineering"):
     """
-    MODIFIED CLIENT FILTER: 
-    Allows 'Approved' OR 'Pending' (NULL) data to ensure 114 nodes stay visible.
-    Still explicitly EXCLUDES any data marked as 'MASKED'.
+    MODIFIED: Allows 'TRUE' or NULL to keep sparse Elizabeth data visible.
+    Handles case-sensitivity for 'True' vs 'TRUE'.
     """
     if client is None: return pd.DataFrame()
 
-    # Get the visibility cutoff for the specific project
     cutoff = PROJECT_VISIBILITY_MASKS.get(project_id, "2000-01-01 00:00:00")
     
     if view_mode == "client":
-        # UPDATED LOGIC:
-        # 1. Must be after the project cutoff date.
-        # 2. Allows 'TRUE' (Approved) OR NULL (Pending/New data).
-        # 3. NOT EXISTS still blocks specific hours marked as 'MASKED'.
+        # UPDATED: (UPPER(rej.approve) = 'TRUE' OR rej.approve IS NULL) 
+        # This prevents 2527 from disappearing when unapproved or mixed-case.
         query_filter = f"""
             AND r.timestamp >= '{cutoff}'
-            AND (rej.approve = 'TRUE' OR rej.approve IS NULL)
+            AND (UPPER(rej.approve) = 'TRUE' OR rej.approve IS NULL)
             AND NOT EXISTS (
                 SELECT 1 FROM `{OVERRIDE_TABLE}` m 
                 WHERE m.NodeNum = r.NodeNum 
@@ -74,7 +74,6 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
             )
         """
     else:
-        # Engineering view sees all non-deleted data
         query_filter = "AND (rej.approve IS NULL OR rej.approve != 'FALSE')"
 
     query = f"""
@@ -90,7 +89,7 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
         LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
             ON r.NodeNum = rej.NodeNum 
             AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
-        WHERE m.Project = '{project_id}'
+        WHERE TRIM(m.Project) = '{project_id}'
         {query_filter}
         AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY m.Location ASC, r.timestamp ASC
@@ -100,51 +99,65 @@ def get_universal_portal_data(project_id, view_mode="engineering"):
     except Exception as e:
         st.error(f"BQ Error: {e}")
         return pd.DataFrame()
+
 ########################
 # 3. GRAPHING ENGINE   #
 ########################
 
-# Added active_refs, unit_mode, and unit_label to the parameters
 def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, display_tz):
-    # ... (keep existing setup code) ...
+    if df.empty: return go.Figure().update_layout(title="No data available.")
 
-    # 1. FIX: Use 'lines+markers' so sparse Bank data remains visible even if gaps exist
-    plot_mode = 'lines+markers' if len(pdf) < 5000 else 'lines'
+    pdf = df.copy()
+    if unit_mode == "Celsius":
+        pdf['temperature'] = (pdf['temperature'] - 32) * 5/9
+        freezing_line = 0
+    else:
+        freezing_line = 32
 
+    pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
+    
+    # Clean Labeling Logic
+    def clean_label(r):
+        bank_val = str(r.get('Bank', '')).strip()
+        if bank_val.lower() not in ["", "none", "nan", "null"]:
+            prefix = "" if "bank" in bank_val.lower() else "Bank "
+            return f"{prefix}{bank_val} ({r['NodeNum']})"
+        return f"{r.get('Depth', '??')}ft ({r['NodeNum']})"
+
+    pdf['label'] = pdf.apply(clean_label, axis=1)
+    
+    fig = go.Figure()
     for lbl in sorted(pdf['label'].unique()):
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # 2. FIX: Increase gap threshold to 24 hours for sparse Elizabeth data
+        # GAP DETECTION: Relaxed to 48 hours for sparse Elizabeth data
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 24.0 # Increased from 6.0
-        
+        gap_mask = s_df['gap_hrs'] > 48.0
         if gap_mask.any():
             gaps = s_df[gap_mask].copy()
             gaps['temperature'] = None
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+        # UPDATED: connectgaps=True and mode='lines+markers' to fix invisible lines
         fig.add_trace(go.Scattergl(
             x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode=plot_mode, connectgaps=False # Using the dynamic plot_mode
+            name=lbl, mode='lines+markers', 
+            connectgaps=True,
+            marker=dict(size=4)
         ))
 
-
-    # Grid Hierarchy (Monday lines vs Daily lines)
+    # Grid Hierarchy
     grid_days = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), freq='D', tz=display_tz)
     for ts in grid_days:
         color, width, dash = ("rgba(0,0,0,1)", 1.2, "solid") if ts.weekday() == 0 else ("rgba(128,128,128,0.4)", 0.8, "dot")
         fig.add_vline(x=ts, line_width=width, line_color=color, line_dash=dash, layer='below')
 
-    # Current Time Marker
     fig.add_vline(x=pd.Timestamp.now(tz=display_tz), line_width=2, line_color="Red", line_dash="dash")
-    
-    # Standard Freezing Reference Line
     fig.add_hline(y=freezing_line, line_dash="dash", line_color="RoyalBlue", 
                  annotation_text=f"{freezing_line}{unit_label} Freezing")
     
-    # CUSTOM PROJECT REFERENCE LINES (active_refs)
     for ref in active_refs:
         try:
             val = float(ref)
@@ -162,20 +175,12 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
 
 def render_client_portal(selected_project, display_tz, unit_mode, unit_label, active_refs):
     st.header(f"📊 Project Status: {selected_project}")
-    global client
-
-    if not selected_project or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar.")
-        return
     
-    with st.spinner("Loading approved data..."):
-        # Uses the universal portal engine to pull approved, non-masked data [cite: 15, 16]
+    with st.spinner("Loading Elizabeth data..."):
         p_df = get_universal_portal_data(selected_project, view_mode="client")
     
-    if not p_df.empty:
-        st.caption(f"✅ Found {len(p_df)} approved records for {selected_project}.")
-    else:
-        st.warning(f"⚠️ No data marked as 'Approved' found for {selected_project}. Check the Admin Tools.")
+    if p_df.empty:
+        st.warning(f"⚠️ No data found for {selected_project}. Check metadata mapping.")
         return
 
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
@@ -186,108 +191,43 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
         start_view = end_view - timedelta(weeks=weeks_view)
         
         locations = sorted(p_df['Location'].dropna().unique())
-        
         for loc in locations:
-            with st.expander(f"📍 {loc}", expanded=(len(locations) == 1)):
+            with st.expander(f"📍 {loc}", expanded=True):
                 loc_data = p_df[p_df['Location'] == loc].copy()
-                
-                if loc_data.empty:
-                    st.write("No data available for this specific location.")
-                    continue
-
                 fig = build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"{loc} Approved Data", 
-                    start_view=start_view, 
-                    end_view=end_view, 
-                    active_refs=tuple(active_refs), 
-                    unit_mode=unit_mode, 
-                    unit_label=unit_label, 
-                    display_tz=display_tz 
+                    df=loc_data, title=f"{loc} Approved Data", 
+                    start_view=start_view, end_view=end_view, 
+                    active_refs=tuple(active_refs), unit_mode=unit_mode, 
+                    unit_label=unit_label, display_tz=display_tz 
                 )
-                st.plotly_chart(fig, use_container_width=True, key=f"portal_grid_{loc}")
+                st.plotly_chart(fig, use_container_width=True)
 
     with tab_depth:
-        st.subheader("📏 Vertical Temperature Profile")
-        # Ensure Depth is numeric for proper Y-axis scaling [cite: 6, 9]
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
-        
+        depth_only = p_df.dropna(subset=['Depth_Num']).copy()
         for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} Weekly Snapshots", expanded=False):
+            with st.expander(f"📏 {loc} Vertical Profile"):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
-                
-                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=6, freq='W-MON')
-                
+                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
                 for m_date in mondays:
                     target_ts = m_date.replace(hour=6, minute=0, second=0)
                     window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                       (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                    
                     if not window.empty:
-                        snap_df = (
-                            window.assign(diff=(window['timestamp'] - target_ts).abs())
-                            .sort_values(['NodeNum', 'diff'])
-                            .drop_duplicates('NodeNum')
-                            .sort_values('Depth_Num')
-                        )
-                        
-                        conv_temps = snap_df['temperature'].apply(
-                            lambda x: (x - 32) * 5/9 if unit_mode == "Celsius" else x
-                        )
-                        
-                        fig_d.add_trace(go.Scatter(
-                            x=conv_temps, 
-                            y=snap_df['Depth_Num'], 
-                            mode='lines+markers', 
-                            name=target_ts.strftime('%m/%d/%y'),
-                            line=dict(shape='spline', smoothing=0.5)
-                        ))
-
+                        snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
+                        conv_temps = snap_df['temperature'].apply(lambda x: (x-32)*5/9 if unit_mode == "Celsius" else x)
+                        fig_d.add_trace(go.Scatter(x=conv_temps, y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
+                
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                
-                # UPDATED: Grid logic and fixed -20 to 80 scale
-                fig_d.update_layout(
-                    plot_bgcolor='white', height=600,
-                    xaxis=dict(
-                        title=f"Temp ({unit_label})", 
-                        range=[-20, 80], # Fixed window
-                        dtick=20, # Major grid
-                        gridcolor='Gainsboro', gridwidth=1.2,
-                        minor=dict(dtick=5, gridcolor='whitesmoke', gridwidth=0.8), # Minor grid
-                        showline=True, linecolor='black', mirror=True
-                    ),
-                    yaxis=dict(
-                        title="Depth (ft)", 
-                        range=[y_limit, 0], 
-                        dtick=10, # Major grid
-                        gridcolor='Silver', gridwidth=1.2,
-                        minor=dict(dtick=2.5, gridcolor='whitesmoke', gridwidth=0.8), # Minor grid
-                        showline=True, linecolor='black', mirror=True
-                    ),
-                    legend=dict(orientation="h", y=-0.2)
-                )
-                
-                # Reference Freezing Line
-                f_val = 0 if unit_mode == "Celsius" else 32
-                fig_d.add_vline(x=f_val, line_dash="dash", line_color="RoyalBlue")
-                
-                st.plotly_chart(fig_d, use_container_width=True, key=f"d_graph_{loc}")
+                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title=unit_label))
+                st.plotly_chart(fig_d, use_container_width=True)
 
     with tab_table:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        latest['Current Temp'] = latest['temperature'].apply(
-            lambda x: f"{round((x-32)*5/9 if unit_mode=='Celsius' else x, 1)}{unit_label}"
-        )
-        latest['Position'] = latest.apply(
-            lambda r: f"Bank {r['Bank']}" if pd.notnull(r['Bank']) and str(r['Bank']).strip() != "" 
-            else f"{r.get('Depth', '??')} ft", axis=1
-        )
-        st.dataframe(
-            latest[['Location', 'Position', 'Current Temp', 'NodeNum']].sort_values(['Location', 'Position']), 
-            use_container_width=True, hide_index=True
-        )
+        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round((x-32)*5/9 if unit_mode=='Celsius' else x, 1)}{unit_label}")
+        st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values('Location'), use_container_width=True, hide_index=True)
+
 ###########################
 # 4. MAIN UI LAYOUT       #
 ###########################
@@ -295,13 +235,6 @@ def render_client_portal(selected_project, display_tz, unit_mode, unit_label, ac
 st.title(f"📊 {CLIENT_NAME}")
 st.caption(f"{LOCATION_STAMP} | Timezone: {DISPLAY_TZ}")
 
-# Ensure this is defined so the query doesn't fail on 'cutoff'
-PROJECT_VISIBILITY_MASKS = {
-    "2538-Ferndale": "2024-01-01 00:00:00" 
-}
-
-# The NameError is fixed by calling the function defined in Section 2
-# This will now work once the 'Drive' scopes are added to Section 1
 render_client_portal(
     selected_project=TARGET_PROJECT, 
     display_tz=DISPLAY_TZ, 
