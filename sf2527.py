@@ -21,10 +21,7 @@ def get_bq_client():
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            SCOPES = [
-                "https://www.googleapis.com/auth/bigquery",
-                "https://www.googleapis.com/auth/drive.readonly"
-            ]
+            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
         return bigquery.Client(project=PROJECT_ID)
@@ -34,9 +31,7 @@ def get_bq_client():
 
 client = get_bq_client()
 
-PROJECT_VISIBILITY_MASKS = {
-    "2527": "2026-04-24 00:00:00"
-}
+PROJECT_VISIBILITY_MASKS = {"2527": "2026-01-01 00:00:00"}
 
 ############################
 # 2. DATA ENGINE LOGIC     #
@@ -107,11 +102,10 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+        # CUSTOM HOVER & TRACE
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], 
-            y=s_df['temperature'], 
-            name=lbl, 
-            mode='lines+markers', 
+            x=s_df['timestamp'], y=s_df['temperature'], 
+            name=lbl, mode='lines+markers', 
             connectgaps=False, 
             customdata=s_df[['Depth']],
             hovertemplate="<b>%{x|%b %d, %H:00}</b><br>Depth: %{customdata[0]}ft<br>Temp: %{y:.1f}°F<extra></extra>",
@@ -119,58 +113,27 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             line=dict(width=1.5)
         ))
 
-    # --- GRID HIERARCHY LOGIC ---
+    # FREEZING REFERENCE LINE
+    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2,
+                 annotation_text="32°F FREEZING", annotation_position="top left")
+
+    # GRID & LAYOUT
     fig.update_layout(
-        title=f"<b>{title}</b>", 
-        hovermode="closest",
-        plot_bgcolor='white',
+        title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
         xaxis=dict(
-            range=[start_view, end_view],
-            showline=True, 
-            mirror=True,
-            linecolor='black',
-            # Major Grid: Daily
-            dtick="D1", 
-            gridcolor='Gainsboro', 
-            gridwidth=1,
-            # Minor Grid: 6 Hours
-            minor=dict(
-                dtick=6 * 60 * 60 * 1000, # 6 hours in milliseconds
-                gridcolor='whitesmoke', 
-                gridwidth=0.5,
-                showgrid=True
-            ),
+            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
+            dtick="D1", gridcolor='Gainsboro', # Major: Daily
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke'), # Minor: 6hr
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title="Temperature (°F)",
-            range=[-20, 80],
-            showline=True, 
-            mirror=True,
-            linecolor='black',
-            # Major Grid: 10 degrees
-            dtick=10, 
-            gridcolor='Gainsboro', 
-            gridwidth=1,
-            # Minor Grid: 5 degrees
-            minor=dict(
-                dtick=5, 
-                gridcolor='whitesmoke', 
-                gridwidth=0.5,
-                showgrid=True
-            )
+            title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
+            dtick=10, gridcolor='Gainsboro', # Major: 10 deg
+            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke') # Minor: 5 deg
         ),
-        height=600, 
-        margin=dict(r=150, t=50, b=50),
+        height=600, margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
-    
-    # Optional: Highlight Monday lines specifically (as seen in previous versions)
-    # This adds a darker line for the start of the week
-    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
-    for monday in mondays:
-        fig.add_vline(x=monday, line_width=1.5, line_color="Silver", layer="below")
-
     return fig
 
 ###########################
@@ -183,26 +146,20 @@ st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
-    # RESTORED: THE THREE TABS
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
         weeks_view = st.slider("Weeks to View", 1, 12, 6, key="weeks_slider")
         end_view = pd.Timestamp.now(tz='UTC')
         start_view = end_view - timedelta(weeks=weeks_view)
-        
-        locs = sorted(data['Location'].unique())
-        for loc in locs:
+        for loc in sorted(data['Location'].unique()):
             with st.expander(f"📍 {loc}", expanded=True):
-                loc_df = data[data['Location'] == loc]
-                fig = build_high_speed_graph(loc_df, f"{loc} Timeline", start_view, end_view, "America/New_York")
+                fig = build_high_speed_graph(data[data['Location'] == loc], f"{loc} Timeline", start_view, end_view, "America/New_York")
                 st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
 
     with tab_depth:
-        st.subheader("📏 Vertical Temperature Profile")
         data['Depth_Num'] = pd.to_numeric(data['Depth'], errors='coerce')
         depth_only = data.dropna(subset=['Depth_Num']).copy()
-        
         for loc in sorted(depth_only['Location'].unique()):
             with st.expander(f"📏 {loc} Vertical Profile"):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
@@ -210,27 +167,17 @@ if not data.empty:
                 mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
                 for m_date in mondays:
                     target_ts = m_date.replace(hour=6, minute=0, second=0)
-                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     if not window.empty:
                         snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                        
-                        # UPDATED HOVER FOR DEPTH PROFILE:
-                        fig_d.add_trace(go.Scatter(
-                            x=snap_df['temperature'], 
-                            y=snap_df['Depth_Num'], 
-                            mode='lines+markers', 
-                            name=target_ts.strftime('%m/%d/%y'),
-                            customdata=snap_df[['timestamp']],
-                            hovertemplate="<b>%{customdata[0]|%b %d, %H:00}</b><br>Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
-                        ))
-                
-                y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title="°F"), hovermode="closest")
+                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y'),
+                                                 customdata=snap_df[['timestamp']],
+                                                 hovertemplate="<b>%{customdata[0]|%b %d, %H:00}</b><br>Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"))
+                fig_d.add_vline(x=32, line_dash="dash", line_color="RoyalBlue")
+                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[int(((loc_data['Depth_Num'].max()//10)+1)*10), 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title="°F"), hovermode="closest")
                 st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
 
     with tab_table:
-        st.subheader("📋 Latest Sensor Readings")
         latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
         st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values('Location'), width='stretch', hide_index=True)
