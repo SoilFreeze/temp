@@ -110,6 +110,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
+    # Sorting and Labeling Logic
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b and b.lower() not in ['nan', 'none']: return f"Bank {b}", 0.0
@@ -145,36 +146,46 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], 
-                y=s_df['temperature'], 
-                # This puts the Node Number back into the legend
-                name=f"{d_lbl} ({sn})", 
-                legendgroup=d_lbl,
-                # This ensures the current sensor is always visible in the legend
+                x=s_df['timestamp'], y=s_df['temperature'], 
+                name=f"{d_lbl} ({sn})", legendgroup=d_lbl,
                 showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines+markers', 
-                connectgaps=False, 
+                mode='lines+markers', connectgaps=False, 
                 line=dict(color=color, width=1.5),
                 marker=dict(size=4, opacity=0.8),
-                # This adds the Node Number to the unified hover popup
                 hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
             ))
 
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
+    # --- GRID HIERARCHY WITH DASHED MINORS ---
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="x unified", plot_bgcolor='white',
-        xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-                   showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, tickformat='%b %d\n%H:%M'),
-        yaxis=dict(title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
-                   dtick=10, gridcolor='DarkGray', minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')),
+        xaxis=dict(
+            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
+            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, 
+            minor=dict(
+                dtick=6*60*60*1000, 
+                showgrid=True, 
+                gridcolor='Gainsboro', 
+                griddash='dash'  # <--- THIS DASHES THE 6-HOUR LINES
+            ),
+            tickformat='%b %d\n%H:%M'
+        ),
+        yaxis=dict(
+            title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
+            dtick=10, gridcolor='DarkGray',
+            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
+        ),
         height=600, margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
-    mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), end=end_view.tz_convert(display_tz).ceil('D'), freq='W-MON', tz=display_tz)
+    mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
+                             end=end_view.tz_convert(display_tz).ceil('D'), 
+                             freq='W-MON', tz=display_tz)
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
+
     return fig
 
 ###########################
