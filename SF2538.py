@@ -74,6 +74,24 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, start_date_str):
     if client is None: return pd.DataFrame()
     
+    # 1. Fetch current schema to check for sensor-swap columns
+    try:
+        table_ref = client.get_table(METADATA_TABLE)
+        column_names = [field.name for field in table_ref.schema]
+    except Exception as e:
+        st.error(f"Table Access Error: {e}")
+        return pd.DataFrame()
+    
+    # 2. Build the sensor lifecycle logic if columns exist
+    if "Start_Date" in column_names and "End_Date" in column_names:
+        lifecycle_join = """
+            AND r.timestamp >= COALESCE(SAFE_CAST(m.Start_Date AS TIMESTAMP), '2000-01-01')
+            AND r.timestamp <= COALESCE(SAFE_CAST(m.End_Date AS TIMESTAMP), '2099-12-31')
+        """
+    else:
+        lifecycle_join = ""
+
+    # 3. THE SQL QUERY: Updated to strictly enforce the start_date_str
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -85,25 +103,19 @@ def get_universal_portal_data(project_id, start_date_str):
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m 
             ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))
-            -- Logic to handle sensor lifecycle
-            AND r.timestamp >= COALESCE(SAFE_CAST(m.Start_Date AS TIMESTAMP), '2000-01-01')
-            AND r.timestamp <= COALESCE(SAFE_CAST(m.End_Date AS TIMESTAMP), '2099-12-31')
+            {lifecycle_join}
         WHERE CAST(m.Project AS STRING) = '{project_id}'
-        AND r.timestamp >= '{start_date_str}'
+        -- THIS LINE HIDES THE MASKED DATA:
+        AND r.timestamp >= TIMESTAMP('{start_date_str}')
         ORDER BY r.timestamp ASC
     """
     try:
-        # Check if the table actually has the lifecycle columns
-        table_ref = client.get_table(METADATA_TABLE)
-        column_names = [field.name for field in table_ref.schema]
-        
-        # If snapshot doesn't have dates yet, remove that part of query
-        if "Start_Date" not in column_names:
-            query = query.replace("AND r.timestamp >= COALESCE", "-- AND r.timestamp")
-            
-        return client.query(query).to_dataframe()
+        df = client.query(query).to_dataframe()
+        df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
+        df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
+        return df
     except Exception as e:
-        st.error(f"BQ Error: {e}")
+        st.error(f"BQ Query Error: {e}")
         return pd.DataFrame()
 
 ########################
