@@ -107,30 +107,70 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # UPDATED HOVERTOOLTIP:
-        # <span style='font-size:14px'>%{x|%b %d, %H:00}</span> -> Shows Date and Hour (e.g., Apr 30, 14:00)
-        # Depth: %{customdata[0]}ft -> Pulls depth from the customdata array
-        # Temp: %{y:.1f}°F -> Shows temperature rounded to 1 decimal
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], 
             y=s_df['temperature'], 
             name=lbl, 
             mode='lines+markers', 
             connectgaps=False, 
-            customdata=s_df[['Depth']], # Passing Depth to the hover engine
+            customdata=s_df[['Depth']],
             hovertemplate="<b>%{x|%b %d, %H:00}</b><br>Depth: %{customdata[0]}ft<br>Temp: %{y:.1f}°F<extra></extra>",
             marker=dict(size=4, opacity=0.8),
             line=dict(width=1.5)
         ))
 
+    # --- GRID HIERARCHY LOGIC ---
     fig.update_layout(
         title=f"<b>{title}</b>", 
-        hovermode="closest", # Changed from unified to closest for cleaner single-node popups
-        xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, tickformat='%b %d'),
-        yaxis=dict(title="°F", gridcolor='Gainsboro', showline=True, mirror=True, range=[-20, 80]),
-        height=600, margin=dict(r=150, t=50, b=50),
+        hovermode="closest",
+        plot_bgcolor='white',
+        xaxis=dict(
+            range=[start_view, end_view],
+            showline=True, 
+            mirror=True,
+            linecolor='black',
+            # Major Grid: Daily
+            dtick="D1", 
+            gridcolor='Gainsboro', 
+            gridwidth=1,
+            # Minor Grid: 6 Hours
+            minor=dict(
+                dtick=6 * 60 * 60 * 1000, # 6 hours in milliseconds
+                gridcolor='whitesmoke', 
+                gridwidth=0.5,
+                showgrid=True
+            ),
+            tickformat='%b %d\n%H:%M'
+        ),
+        yaxis=dict(
+            title="Temperature (°F)",
+            range=[-20, 80],
+            showline=True, 
+            mirror=True,
+            linecolor='black',
+            # Major Grid: 10 degrees
+            dtick=10, 
+            gridcolor='Gainsboro', 
+            gridwidth=1,
+            # Minor Grid: 5 degrees
+            minor=dict(
+                dtick=5, 
+                gridcolor='whitesmoke', 
+                gridwidth=0.5,
+                showgrid=True
+            )
+        ),
+        height=600, 
+        margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
+    
+    # Optional: Highlight Monday lines specifically (as seen in previous versions)
+    # This adds a darker line for the start of the week
+    mondays = pd.date_range(start=start_view, end=end_view, freq='W-MON')
+    for monday in mondays:
+        fig.add_vline(x=monday, line_width=1.5, line_color="Silver", layer="below")
+
     return fig
 
 ###########################
