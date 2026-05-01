@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
+import re
 
 #################################################################
 # 1. CONFIGURATION & CLIENT INITIALIZATION                      #
@@ -81,16 +82,30 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    def create_label(r):
-        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})"
-        if d and d.lower() not in ['nan', 'none']: return f"{d}ft ({r['NodeNum']})"
-        return f"Node {r['NodeNum']}"
+    # NEW SORT LOGIC: Create a label AND a numeric sort value
+    def get_sort_info(r):
+        b = str(r['Bank']).strip()
+        d = str(r['Depth']).strip()
+        if b and b.lower() not in ['nan', 'none']:
+            return f"Bank {b} ({r['NodeNum']})", 0.0  # Banks at the top
+        if d and d.lower() not in ['nan', 'none']:
+            try:
+                num_depth = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
+                return f"{d}ft ({r['NodeNum']})", num_depth
+            except:
+                return f"{d}ft ({r['NodeNum']})", 999.0
+        return f"Node {r['NodeNum']}", 1000.0
 
-    pdf['label'] = pdf.apply(create_label, axis=1)
+    # Apply the logic to create two new columns
+    pdf[['label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
     fig = go.Figure()
-    for lbl in sorted(pdf['label'].unique()):
+    
+    # Sort the unique labels by their numeric depth value
+    sorted_labels = pdf[['label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+
+    for _, row in sorted_labels.iterrows():
+        lbl = row['label']
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
         # GAP DETECTION: 6.0 hours
@@ -102,7 +117,6 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # CUSTOM HOVER & TRACE
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'], 
             name=lbl, mode='lines+markers', 
@@ -113,26 +127,24 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             line=dict(width=1.5)
         ))
 
-    # FREEZING REFERENCE LINE
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2,
-                 annotation_text="32°F FREEZING", annotation_position="top left")
+    # FREEZING LINE & GRID
+    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
-    # GRID & LAYOUT
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            dtick="D1", gridcolor='Gainsboro', # Major: Daily
-            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke'), # Minor: 6hr
+            dtick="D1", gridcolor='Gainsboro',
+            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke'),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
             title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
-            dtick=10, gridcolor='Gainsboro', # Major: 10 deg
-            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke') # Minor: 5 deg
+            dtick=10, gridcolor='Gainsboro',
+            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
         ),
         height=600, margin=dict(r=150, t=50, b=50),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, traceorder="normal")
     )
     return fig
 
@@ -143,8 +155,6 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 st.title(f"📊 SJI Erie St Remediation")
 st.caption(f"Project {TARGET_PROJECT} Status")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
-
-# Added the bold note regarding data uploads
 st.markdown("**Data will be uploaded once per business day by 4pm Pacific Time.**")
 
 data = get_universal_portal_data(TARGET_PROJECT)
@@ -184,6 +194,6 @@ if not data.empty:
     with tab_table:
         latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
-        st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values('Location'), width='stretch', hide_index=True)
+        st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values(['Location', 'Depth']), width='stretch', hide_index=True)
 else:
     st.info("Loading project streams...")
