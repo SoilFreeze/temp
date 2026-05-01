@@ -17,7 +17,7 @@ PROJECT_REGISTRY = {
     "2538-Ferndale": {
         "name": "Pump 16 Upgrade",
         "location": "Ferndale, WA",
-        "start_date": "2024-01-01 00:00:00",
+        "start_date": "2024-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
         "upload_note": "Data is synced once per business day.",
         "unit": "°F"
