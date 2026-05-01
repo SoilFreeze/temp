@@ -91,7 +91,7 @@ def get_universal_portal_data(project_id, start_date_str):
     else:
         lifecycle_join = ""
 
-    # 3. THE SQL QUERY: Updated to strictly enforce the start_date_str
+    # 3. THE SQL QUERY: Enforcing the 4/22 Start Date
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -105,12 +105,13 @@ def get_universal_portal_data(project_id, start_date_str):
             ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))
             {lifecycle_join}
         WHERE CAST(m.Project AS STRING) = '{project_id}'
-        -- THIS LINE HIDES THE MASKED DATA:
+        -- HARD CUTOFF: This ignores all data before your start_date variable
         AND r.timestamp >= TIMESTAMP('{start_date_str}')
         ORDER BY r.timestamp ASC
     """
     try:
         df = client.query(query).to_dataframe()
+        # Clean up strings
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
         return df
