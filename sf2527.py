@@ -144,6 +144,9 @@ st.title(f"📊 SJI Erie St Remediation")
 st.caption(f"Project {TARGET_PROJECT} Status")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 
+# Added the bold note regarding data uploads
+st.markdown("**Data will be uploaded once per business day by 4pm Pacific Time.**")
+
 data = get_universal_portal_data(TARGET_PROJECT)
 
 if not data.empty:
