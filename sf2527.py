@@ -82,6 +82,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
+    # Numeric Sorting
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})", 0.0
@@ -101,6 +102,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         lbl = row['label']
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
+        # 6h Gap Detection
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
@@ -120,26 +122,27 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
-    # --- REFINED GRID COLORS ---
+    # --- REPAIRED GRID HIERARCHY ---
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            dtick="D1", 
-            gridcolor='DarkGray',  # DARKER LIGHT LINES (Daily Midnight)
+            showgrid=True,             # Explicitly enable daily lines
+            dtick="D1",                # Midnight every day
+            gridcolor='DarkGray',      # Darker light lines
             gridwidth=1, 
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
             title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
-            dtick=10, gridcolor='DarkGray', # Consistent with x-axis
+            dtick=10, gridcolor='DarkGray',
             minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
         ),
         height=600, margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
-    # LIGHTER DARK LINES (Mondays)
+    # Monday "Lighter Dark" lines
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
