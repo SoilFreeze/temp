@@ -140,8 +140,8 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 # 4. MAIN UI LAYOUT       #
 ###########################
 
-st.title(f"📊 Project {TARGET_PROJECT} Status")
-st.caption(f"SJI Erie St Remediation")
+st.title(f"📊 SJI Erie St Remediation")
+st.caption(f"Project {TARGET_PROJECT} Status")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 
 data = get_universal_portal_data(TARGET_PROJECT)
