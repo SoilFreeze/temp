@@ -15,6 +15,9 @@ DATASET_ID = "Temperature"
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
+# SET PROJECT START DATE
+PROJECT_START_DATE = "2026-04-24 00:00:00"
+
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
 @st.cache_resource
@@ -32,7 +35,7 @@ def get_bq_client():
 
 client = get_bq_client()
 
-PROJECT_VISIBILITY_MASKS = {"2527": "2026-04-24 00:00:00"}
+PROJECT_VISIBILITY_MASKS = {TARGET_PROJECT: PROJECT_START_DATE}
 
 ############################
 # 2. DATA ENGINE LOGIC     #
@@ -60,7 +63,6 @@ def get_universal_portal_data(project_id):
         WHERE CAST(m.Project AS STRING) = '{project_id}'
         AND r.timestamp >= '{cutoff}'
         AND (UPPER(CAST(rej.approve AS STRING)) != 'FALSE' OR rej.approve IS NULL)
-        AND r.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 84 DAY)
         ORDER BY r.timestamp ASC
     """
     try:
@@ -82,7 +84,6 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Numeric Sorting Logic
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})", 0.0
@@ -102,7 +103,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         lbl = row['label']
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # 6-Hour Gap Detection
+        # Gap Detection (6 hours)
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
@@ -120,18 +121,13 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             marker=dict(size=4, opacity=0.8), line=dict(width=1.5)
         ))
 
-    # Reference Line
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
-    # --- GRID HIERARCHY MATCHING YOUR IMAGE ---
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            showgrid=True,             
-            dtick="D1",                # Midnight every day
-            gridcolor='DarkGray',      # Substantial Daily Lines
-            gridwidth=1, 
+            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, 
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
@@ -143,11 +139,10 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
-    # Monday "Standout" Lines
+    # Monday dark grid lines
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
-    
     for mon in mondays:
         fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
 
@@ -168,9 +163,14 @@ if not data.empty:
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
     with tab_time:
-        weeks_view = st.slider("Weeks to View", 1, 12, 6, key="weeks_slider")
+        # Adjusted Start View to your project date: 4/24
+        project_start = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
         end_view = pd.Timestamp.now(tz='UTC')
-        start_view = end_view - timedelta(weeks=weeks_view)
+        
+        # Slider still works, but we default it to show from project start
+        weeks_view = st.slider("Weeks to View", 1, 12, 1, key="weeks_slider")
+        start_view = max(project_start, end_view - timedelta(weeks=weeks_view))
+        
         for loc in sorted(data['Location'].unique()):
             with st.expander(f"📍 {loc}", expanded=True):
                 fig = build_high_speed_graph(data[data['Location'] == loc], f"{loc} Timeline", start_view, end_view, "America/New_York")
@@ -183,7 +183,7 @@ if not data.empty:
             with st.expander(f"📏 {loc} Vertical Profile"):
                 loc_data = depth_only[depth_only['Location'] == loc].copy()
                 fig_d = go.Figure()
-                mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+                mondays = pd.date_range(start=project_start, end=pd.Timestamp.now(tz='UTC'), freq='W-MON')
                 for m_date in mondays:
                     target_ts = m_date.replace(hour=6, minute=0, second=0)
                     window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
@@ -198,7 +198,9 @@ if not data.empty:
 
     with tab_table:
         latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        latest['Depth_Sort'] = pd.to_numeric(latest['Depth'], errors='coerce').fillna(0)
         latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}°F")
-        st.dataframe(latest[['Location', 'NodeNum', 'Current Temp']].sort_values(['Location', 'Depth']), width='stretch', hide_index=True)
+        display_df = latest.sort_values(['Location', 'Depth_Sort'])[['Location', 'NodeNum', 'Current Temp']]
+        st.dataframe(display_df, width='stretch', hide_index=True)
 else:
-    st.info("Loading project streams...")
+    st.info("Awaiting initial data streams for project start (4/24)...")
