@@ -145,13 +145,19 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], y=s_df['temperature'], 
-                name=d_lbl, legendgroup=d_lbl,
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                # This puts the Node Number back into the legend
+                name=f"{d_lbl} ({sn})", 
+                legendgroup=d_lbl,
+                # This ensures the current sensor is always visible in the legend
                 showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines+markers', connectgaps=False, 
+                mode='lines+markers', 
+                connectgaps=False, 
                 line=dict(color=color, width=1.5),
                 marker=dict(size=4, opacity=0.8),
-                hovertemplate="%{y:.1f}°F<extra></extra>"
+                # This adds the Node Number to the unified hover popup
+                hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
             ))
 
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
