@@ -84,47 +84,64 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
+    # Sort info for legend and coloring
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})", 0.0
+        if b and b.lower() not in ['nan', 'none']: return f"Bank {b}", 0.0
         if d and d.lower() not in ['nan', 'none']:
             try:
                 num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
-                return f"{d}ft ({r['NodeNum']})", num
-            except: return f"{d}ft ({r['NodeNum']})", 999.0
+                return f"{d}ft", num
+            except: return f"{d}ft", 999.0
         return f"Node {r['NodeNum']}", 1000.0
 
-    pdf[['label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
-    
+    pdf[['depth_label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     fig = go.Figure()
-    sorted_labels = pdf[['label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+    
+    unique_depths = pdf[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-    for _, row in sorted_labels.iterrows():
-        lbl = row['label']
-        s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
+    for i, (_, d_row) in enumerate(unique_depths.iterrows()):
+        d_lbl = d_row['depth_label']
+        depth_data = pdf[pdf['depth_label'] == d_lbl]
+        color = colors[i % len(colors)]
+        sensors_at_depth = depth_data['NodeNum'].unique()
         
-        # Gap Detection (6 hours)
-        s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-        gap_mask = s_df['gap_hrs'] > 6.0
-        if gap_mask.any():
-            gaps = s_df[gap_mask].copy()
-            gaps['temperature'] = None
-            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+        for j, sn in enumerate(sensors_at_depth):
+            s_df = depth_data[depth_data['NodeNum'] == sn].sort_values('timestamp')
+            
+            # 6h Gap Detection
+            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+            gap_mask = s_df['gap_hrs'] > 6.0
+            if gap_mask.any():
+                gaps = s_df[gap_mask].copy()
+                gaps['temperature'] = None
+                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines+markers', 
-            connectgaps=False, 
-            customdata=s_df[['Depth']],
-            hovertemplate="<b>%{x|%b %d, %H:00}</b><br>Depth: %{customdata[0]}ft<br>Temp: %{y:.1f}°F<extra></extra>",
-            marker=dict(size=4, opacity=0.8), line=dict(width=1.5)
-        ))
+            # Trace Configuration
+            fig.add_trace(go.Scatter(
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                name=f"{d_lbl} ({sn})",
+                legendgroup=d_lbl,
+                showlegend=True if j == len(sensors_at_depth)-1 else False,
+                mode='lines+markers', 
+                connectgaps=False, 
+                line=dict(color=color, width=1.5),
+                marker=dict(size=4, opacity=0.8),
+                # Tooltip: simplified for unified mode
+                hovertemplate="%{y:.1f}°F<extra></extra>" 
+            ))
 
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
     fig.update_layout(
-        title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
+        title=f"<b>{title}</b>", 
+        # FIX: "x unified" shows all sensors at that timestamp in one box
+        hovermode="x unified", 
+        hoverlabel=dict(bgcolor="white", font_size=12),
+        plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
             showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, 
@@ -139,7 +156,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
-    # Monday dark grid lines
+    # Monday grid lines
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
