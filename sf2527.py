@@ -82,33 +82,27 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # NEW SORT LOGIC: Create a label AND a numeric sort value
+    # Numerical Sorting Logic
     def get_sort_info(r):
-        b = str(r['Bank']).strip()
-        d = str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']:
-            return f"Bank {b} ({r['NodeNum']})", 0.0  # Banks at the top
+        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
+        if b and b.lower() not in ['nan', 'none']: return f"Bank {b} ({r['NodeNum']})", 0.0
         if d and d.lower() not in ['nan', 'none']:
             try:
-                num_depth = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
-                return f"{d}ft ({r['NodeNum']})", num_depth
-            except:
-                return f"{d}ft ({r['NodeNum']})", 999.0
+                num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
+                return f"{d}ft ({r['NodeNum']})", num
+            except: return f"{d}ft ({r['NodeNum']})", 999.0
         return f"Node {r['NodeNum']}", 1000.0
 
-    # Apply the logic to create two new columns
     pdf[['label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     
     fig = go.Figure()
-    
-    # Sort the unique labels by their numeric depth value
     sorted_labels = pdf[['label', 'sort_val']].drop_duplicates().sort_values('sort_val')
 
     for _, row in sorted_labels.iterrows():
         lbl = row['label']
         s_df = pdf[pdf['label'] == lbl].sort_values('timestamp')
         
-        # GAP DETECTION: 6.0 hours
+        # 6-Hour Gap Detection
         s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
         gap_mask = s_df['gap_hrs'] > 6.0
         if gap_mask.any():
@@ -123,19 +117,19 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             connectgaps=False, 
             customdata=s_df[['Depth']],
             hovertemplate="<b>%{x|%b %d, %H:00}</b><br>Depth: %{customdata[0]}ft<br>Temp: %{y:.1f}°F<extra></extra>",
-            marker=dict(size=4, opacity=0.8),
-            line=dict(width=1.5)
+            marker=dict(size=4, opacity=0.8), line=dict(width=1.5)
         ))
 
-    # FREEZING LINE & GRID
+    # Reference Line
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
+    # --- UPDATED GRID HIERARCHY ---
+    # Major lines (Midnight Daily)
     fig.update_layout(
         title=f"<b>{title}</b>", hovermode="closest", plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            dtick="D1", gridcolor='Gainsboro',
-            minor=dict(dtick=6*60*60*1000, showgrid=True, gridcolor='whitesmoke'),
+            dtick="D1", gridcolor='Gainsboro', gridwidth=1, # Daily Midnight Lines
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
@@ -144,8 +138,18 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
         ),
         height=600, margin=dict(r=150, t=50, b=50),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1, traceorder="normal")
+        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
+
+    # ADD DARK MONDAY LINES
+    # Calculate every Monday between start and end view
+    mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
+                             end=end_view.tz_convert(display_tz).ceil('D'), 
+                             freq='W-MON', tz=display_tz)
+    
+    for mon in mondays:
+        fig.add_vline(x=mon, line_width=2.5, line_color="black", layer="below")
+
     return fig
 
 ###########################
