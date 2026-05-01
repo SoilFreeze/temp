@@ -141,6 +141,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
 ###########################
 
 st.title(f"📊 Project {TARGET_PROJECT} Status")
+st.caption(f"SJI Erie St Remediation")
 st.caption(f"Location: Elizabeth, NJ | Timezone: America/New_York")
 
 data = get_universal_portal_data(TARGET_PROJECT)
