@@ -40,14 +40,11 @@ PROJECT_LOCATION = active["location"]
 PROJECT_START_DATE = active["start_date"]
 DISPLAY_TZ = active["timezone"]
 UPLOAD_NOTE = active["upload_note"]
-UNIT_LABEL = active["unit"]
 
 # Database Globals
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-
-# Updated to Snapshot as requested
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
@@ -73,25 +70,20 @@ client = get_bq_client()
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id, start_date_str):
     if client is None: return pd.DataFrame()
+
+    # Check if Start_Date exists in the table schema first to avoid the 400 error
+    table_ref = client.get_table(METADATA_TABLE)
+    column_names = [field.name for field in table_ref.schema]
     
-    # 1. Fetch current schema to check for sensor-swap columns
-    try:
-        table_ref = client.get_table(METADATA_TABLE)
-        column_names = [field.name for field in table_ref.schema]
-    except Exception as e:
-        st.error(f"Table Access Error: {e}")
-        return pd.DataFrame()
-    
-    # 2. Build the sensor lifecycle logic if columns exist
+    # Build conditional join logic
     if "Start_Date" in column_names and "End_Date" in column_names:
-        lifecycle_join = """
+        date_filter = """
             AND r.timestamp >= COALESCE(SAFE_CAST(m.Start_Date AS TIMESTAMP), '2000-01-01')
             AND r.timestamp <= COALESCE(SAFE_CAST(m.End_Date AS TIMESTAMP), '2099-12-31')
         """
     else:
-        lifecycle_join = ""
+        date_filter = "" # Fallback if columns are missing
 
-    # 3. THE SQL QUERY: Enforcing the 4/22 Start Date
     query = f"""
         SELECT 
             r.NodeNum, r.timestamp, r.temperature,
@@ -103,15 +95,13 @@ def get_universal_portal_data(project_id, start_date_str):
         ) AS r
         INNER JOIN `{METADATA_TABLE}` AS m 
             ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))
-            {lifecycle_join}
+            {date_filter}
         WHERE CAST(m.Project AS STRING) = '{project_id}'
-        -- HARD CUTOFF: This ignores all data before your start_date variable
-        AND r.timestamp >= TIMESTAMP('{start_date_str}')
+        AND r.timestamp >= '{start_date_str}'
         ORDER BY r.timestamp ASC
     """
     try:
         df = client.query(query).to_dataframe()
-        # Clean up strings
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
         return df
