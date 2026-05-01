@@ -107,17 +107,25 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
             gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
             s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-        # connectgaps=False ensures the 6hr breaks are visible
+        # UPDATED HOVERTOOLTIP:
+        # <span style='font-size:14px'>%{x|%b %d, %H:00}</span> -> Shows Date and Hour (e.g., Apr 30, 14:00)
+        # Depth: %{customdata[0]}ft -> Pulls depth from the customdata array
+        # Temp: %{y:.1f}°F -> Shows temperature rounded to 1 decimal
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'], 
-            name=lbl, mode='lines+markers', 
+            x=s_df['timestamp'], 
+            y=s_df['temperature'], 
+            name=lbl, 
+            mode='lines+markers', 
             connectgaps=False, 
+            customdata=s_df[['Depth']], # Passing Depth to the hover engine
+            hovertemplate="<b>%{x|%b %d, %H:00}</b><br>Depth: %{customdata[0]}ft<br>Temp: %{y:.1f}°F<extra></extra>",
             marker=dict(size=4, opacity=0.8),
             line=dict(width=1.5)
         ))
 
     fig.update_layout(
-        title=f"<b>{title}</b>", hovermode="x unified",
+        title=f"<b>{title}</b>", 
+        hovermode="closest", # Changed from unified to closest for cleaner single-node popups
         xaxis=dict(range=[start_view, end_view], showline=True, mirror=True, tickformat='%b %d'),
         yaxis=dict(title="°F", gridcolor='Gainsboro', showline=True, mirror=True, range=[-20, 80]),
         height=600, margin=dict(r=150, t=50, b=50),
@@ -166,10 +174,19 @@ if not data.empty:
                                       (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                     if not window.empty:
                         snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                        fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
+                        
+                        # UPDATED HOVER FOR DEPTH PROFILE:
+                        fig_d.add_trace(go.Scatter(
+                            x=snap_df['temperature'], 
+                            y=snap_df['Depth_Num'], 
+                            mode='lines+markers', 
+                            name=target_ts.strftime('%m/%d/%y'),
+                            customdata=snap_df[['timestamp']],
+                            hovertemplate="<b>%{customdata[0]|%b %d, %H:00}</b><br>Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
+                        ))
                 
                 y_limit = int(((loc_data['Depth_Num'].max() // 10) + 1) * 10) if not loc_data.empty else 50
-                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title="°F"))
+                fig_d.update_layout(plot_bgcolor='white', height=600, yaxis=dict(range=[y_limit, 0], title="Depth (ft)"), xaxis=dict(range=[-20, 80], title="°F"), hovermode="closest")
                 st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
 
     with tab_table:
