@@ -84,7 +84,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
     pdf = df.copy()
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Sort info for legend and coloring
+    # 1. Logic for naming and sorting
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
         if b and b.lower() not in ['nan', 'none']: return f"Bank {b}", 0.0
@@ -119,28 +119,30 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-            # Trace Configuration
+            # 2. TRACE CONFIGURATION
+            # name set to d_lbl ensures the "Depth/Bank" shows in the unified popup
             fig.add_trace(go.Scatter(
                 x=s_df['timestamp'], 
                 y=s_df['temperature'], 
-                name=f"{d_lbl} ({sn})",
+                name=d_lbl, 
                 legendgroup=d_lbl,
                 showlegend=True if j == len(sensors_at_depth)-1 else False,
                 mode='lines+markers', 
                 connectgaps=False, 
                 line=dict(color=color, width=1.5),
                 marker=dict(size=4, opacity=0.8),
-                # Tooltip: simplified for unified mode
-                hovertemplate="%{y:.1f}°F<extra></extra>" 
+                # This template specifically shows the value next to the name
+                hovertemplate="%{y:.1f}°F<extra></extra>"
             ))
 
+    # Reference Line & Grid
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
     fig.update_layout(
         title=f"<b>{title}</b>", 
-        # FIX: "x unified" shows all sensors at that timestamp in one box
+        # 3. THE "LINE" AND UNIFIED POPUP
         hovermode="x unified", 
-        hoverlabel=dict(bgcolor="white", font_size=12),
+        hoverlabel=dict(bgcolor="rgba(255,255,255,0.9)", font_size=12),
         plot_bgcolor='white',
         xaxis=dict(
             range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
@@ -156,7 +158,7 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
-    # Monday grid lines
+    # Monday dark grid lines
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
