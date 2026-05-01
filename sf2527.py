@@ -6,22 +6,7 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
 
-st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
 
-@st.cache_resource
-def get_bq_client():
-    try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
-        return bigquery.Client(project=PROJECT_ID)
-    except Exception as e:
-        st.error(f"Authentication Failed: {e}")
-        return None
-
-client = get_bq_client()
 #################################################################
 # 1. CENTRAL PROJECT CONFIGURATION                              #
 #################################################################
@@ -53,7 +38,22 @@ DATASET_ID = "Temperature"
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
+st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
 
+@st.cache_resource
+def get_bq_client():
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
+        return bigquery.Client(project=PROJECT_ID)
+    except Exception as e:
+        st.error(f"Authentication Failed: {e}")
+        return None
+
+client = get_bq_client()
 ############################
 # 2. DATA ENGINE LOGIC     #
 ############################
