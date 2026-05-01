@@ -35,7 +35,7 @@ def get_bq_client():
 client = get_bq_client()
 
 PROJECT_VISIBILITY_MASKS = {
-    "2527": "2026-01-01 00:00:00"
+    "2527": "2026-04-24 00:00:00"
 }
 
 ############################
