@@ -31,6 +31,7 @@ PROJECT_LOCATION = active["location"]
 PROJECT_START_DATE = active["start_date"]
 DISPLAY_TZ = active["timezone"]
 UPLOAD_NOTE = active["upload_note"]
+UNIT_LABEL = active.get("unit", "°F")
 
 # Database Globals
 PROJECT_ID = "sensorpush-export"
