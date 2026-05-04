@@ -27,7 +27,7 @@ PROJECT_REGISTRY = {
         "start_date": "2026-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
         "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
-        "as_built_file": "AsBuiltFerndale.jpg" # Added comma here
+        "as_built_file": "AsBuiltElizabeth.jpg" 
     }
 }
 
