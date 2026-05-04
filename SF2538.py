@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import re
 import base64
 import streamlit.components.v1 as components # Add this import
+import os
 
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
@@ -293,33 +294,38 @@ if not data.empty:
         st.subheader("Site As-Built Reference")
         pdf_filename = "AsBuiltElizabeth.pdf"
         
+        # Check if the file is in the main folder
         if os.path.exists(pdf_filename):
-            with open(pdf_filename, "rb") as f:
-                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-            
-            # We embed the PDF as a data string inside a sandboxed iframe
-            # This is the most reliable way for files under 1MB
-            pdf_display = f"""
-                <iframe 
-                    src="data:application/pdf;base64,{base64_pdf}" 
-                    width="100%" 
-                    height="1000px" 
-                    type="application/pdf">
-                </iframe>
-            """
-            
-            components.html(pdf_display, height=1000)
-            
-            # Keep a download button as a fail-safe
-            st.download_button(
-                label="Download PDF Plan",
-                data=base64.b64decode(base64_pdf),
-                file_name=pdf_filename,
-                mime="application/pdf"
-            )
+            try:
+                with open(pdf_filename, "rb") as f:
+                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                
+                # The PDF is small (347KB), so embedding it directly is safe
+                pdf_display = f"""
+                    <iframe 
+                        src="data:application/pdf;base64,{base64_pdf}" 
+                        width="100%" 
+                        height="1000px" 
+                        type="application/pdf"
+                        style="border:none;">
+                    </iframe>
+                """
+                
+                components.html(pdf_display, height=1000)
+                
+                # Fallback Download Button
+                st.download_button(
+                    label="Download PDF Plan",
+                    data=base64.b64decode(base64_pdf),
+                    file_name=pdf_filename,
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                st.error(f"Error loading PDF: {e}")
         else:
-            st.error(f"Could not find {pdf_filename} in the root directory.")
-        
+            st.error(f"File '{pdf_filename}' not found.")
+            st.info("Ensure the PDF is uploaded to GitHub in the same folder as your .py script.")
+            
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
 
