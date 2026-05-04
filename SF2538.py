@@ -292,21 +292,28 @@ if not data.empty:
     with tab_map:
         st.subheader("Site As-Built Reference")
         
-        # In Streamlit Cloud, files in the /static/ folder are 
-        # served at the root path of the app's URL.
-        pdf_path = "static/AsBuiltElizabeth.pdf"
-        
-        # We use a standard <iframe>. This is the most stable method 
-        # for a 347KB file and avoids "Blocked by Chrome" errors.
-        st.components.v1.html(
-            f"""
-            <iframe src="./{pdf_path}" width="100%" height="1000px" style="border:none;"></iframe>
-            """,
-            height=1000,
-        )
+        # Path relative to the script
+        local_path = "static/AsBuiltElizabeth.pdf"
+        # URL relative to the browser
+        public_url = "./app/static/AsBuiltElizabeth.pdf"
     
-        # Adding a clean fallback link just in case
-        st.markdown(f"[Click here to open the PDF in a new tab](./{pdf_path})")
+        import os
+        if os.path.exists(local_path):
+            # We use a container to force a specific width/height
+            st.components.v1.html(
+                f"""
+                <div style="width:100%; height:1000px;">
+                    <embed src="{public_url}" width="100%" height="100%" type="application/pdf">
+                </div>
+                """,
+                height=1000,
+            )
+            
+            # Add a direct link in case the embed fails
+            st.markdown(f"🔗 [Open PDF in Full Screen]({public_url})")
+        else:
+            st.error(f"File not found at `{local_path}`. Please check your GitHub folder structure.")
+            st.info("Your repo should look like: `your-repo/static/AsBuiltElizabeth.pdf` (Check capitalization!)")
         
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
