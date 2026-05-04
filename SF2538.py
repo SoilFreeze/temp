@@ -292,39 +292,35 @@ if not data.empty:
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
         st.subheader("Site As-Built Reference")
-        pdf_filename = "AsBuiltElizabeth.pdf"
         
-        # Check if the file is in the main folder
-        if os.path.exists(pdf_filename):
-            try:
-                with open(pdf_filename, "rb") as f:
-                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                
-                # The PDF is small (347KB), so embedding it directly is safe
-                pdf_display = f"""
-                    <iframe 
-                        src="data:application/pdf;base64,{base64_pdf}" 
-                        width="100%" 
-                        height="1000px" 
-                        type="application/pdf"
-                        style="border:none;">
-                    </iframe>
-                """
-                
-                components.html(pdf_display, height=1000)
-                
-                # Fallback Download Button
-                st.download_button(
-                    label="Download PDF Plan",
-                    data=base64.b64decode(base64_pdf),
-                    file_name=pdf_filename,
-                    mime="application/pdf"
-                )
-            except Exception as e:
-                st.error(f"Error loading PDF: {e}")
+        # 1. The local path for Python to check if it exists
+        local_path = "static/AsBuiltElizabeth.pdf"
+        
+        # 2. The URL path the BROWSER uses to find the file
+        # On Streamlit Cloud, the path is usually /app/static/filename
+        pdf_url = "./app/static/AsBuiltElizabeth.pdf"
+    
+        if os.path.exists(local_path):
+            # We use 'components.html' to create a safe space for the PDF
+            # Adding 'sandbox' tells Chrome this is a restricted, safe element
+            components.html(
+                f"""
+                <iframe 
+                    src="{pdf_url}" 
+                    width="100%" 
+                    height="1000px" 
+                    style="border:none;"
+                    sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts">
+                </iframe>
+                """,
+                height=1000,
+            )
+            
+            # Fallback link in case the user has a very restrictive browser extension
+            st.markdown(f"🔒 *Chrome blocking the embed?* [**Click here to open PDF directly**]({pdf_url})")
         else:
-            st.error(f"File '{pdf_filename}' not found.")
-            st.info("Ensure the PDF is uploaded to GitHub in the same folder as your .py script.")
+            st.error("⚠️ PDF not found in the 'static' folder.")
+            st.code("Current folder structure should be: your_repo/static/AsBuiltElizabeth.pdf")
             
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
