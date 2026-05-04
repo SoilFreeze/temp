@@ -292,31 +292,21 @@ if not data.empty:
     with tab_map:
         st.subheader("Site As-Built Reference")
         
-        # Point directly to the static folder path
-        # Streamlit Cloud serves files in /static/ automatically
-        pdf_url = "static/AsBuiltElizabeth.pdf"
+        # In Streamlit Cloud, files in the /static/ folder are 
+        # served at the root path of the app's URL.
+        pdf_path = "static/AsBuiltElizabeth.pdf"
         
-        # Use a standard iframe pointing to the URL
-        # This bypasses the "Blocked by Chrome" security issue
+        # We use a standard <iframe>. This is the most stable method 
+        # for a 347KB file and avoids "Blocked by Chrome" errors.
         st.components.v1.html(
             f"""
-            <iframe src="{pdf_url}" width="100%" height="1000px" style="border:none;">
-            </iframe>
+            <iframe src="./{pdf_path}" width="100%" height="1000px" style="border:none;"></iframe>
             """,
             height=1000,
         )
     
-        # Fallback Download Button
-        try:
-            with open("static/AsBuiltElizabeth.pdf", "rb") as f:
-                st.download_button(
-                    label="PDF not loading? Click here to download",
-                    data=f,
-                    file_name="AsBuiltElizabeth.pdf",
-                    mime="application/pdf"
-                )
-        except FileNotFoundError:
-            st.warning("Ensure the PDF is inside a folder named 'static' in your repository.")
+        # Adding a clean fallback link just in case
+        st.markdown(f"[Click here to open the PDF in a new tab](./{pdf_path})")
         
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
