@@ -12,7 +12,7 @@ import re
 CURRENT_PROJECT_KEY = "2538-Ferndale" 
 
 PROJECT_REGISTRY = {
-    "2538": {
+    "2538-Ferndale": {
         "name": "Pump Station 16 Upgrade",
         "location": "Ferndale, WA",
         "start_date": "2026-04-22 00:00:00",
