@@ -115,20 +115,27 @@ def get_universal_portal_data(project_id, start_date_str):
 ########################
 
 def build_high_speed_graph(df, title, start_view, end_view, display_tz):
-    if df.empty: return go.Figure().update_layout(title="No data available.")
+    """
+    Generates a Plotly timeline graph with lines only and a 12-hour gap threshold.
+    """
+    if df.empty: 
+        return go.Figure().update_layout(title="No data available.")
 
     pdf = df.copy()
+    # Convert timestamps to the project's local timezone
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Sorting and Labeling Logic
+    # Sorting and Labeling Logic for Legend Grouping
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: return f"Bank {b}", 0.0
+        if b and b.lower() not in ['nan', 'none']: 
+            return f"Bank {b}", 0.0
         if d and d.lower() not in ['nan', 'none']:
             try:
                 num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
                 return f"{d}ft", num
-            except: return f"{d}ft", 999.0
+            except: 
+                return f"{d}ft", 999.0
         return f"Node {r['NodeNum']}", 1000.0
 
     pdf[['depth_label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
@@ -146,50 +153,70 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         for j, sn in enumerate(sensors_at_depth):
             s_df = depth_data[depth_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # 6h Gap Detection
+            # --- 12h GAP DETECTION ---
+            # Calculates difference between readings; if > 12 hours, inserts a None to break the line
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
+            gap_mask = s_df['gap_hrs'] > 12.0 
             if gap_mask.any():
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+            # --- TRACE CONFIGURATION (LINES ONLY) ---
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], y=s_df['temperature'], 
-                name=f"{d_lbl} ({sn})", legendgroup=d_lbl,
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                name=f"{d_lbl} ({sn})", 
+                legendgroup=d_lbl,
                 showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines+markers', connectgaps=False, 
-                line=dict(color=color, width=1.5),
-                marker=dict(size=4, opacity=0.8),
+                mode='lines',  # Removed '+markers' to hide points
+                connectgaps=False, 
+                line=dict(color=color, width=2.0), # Width 2.0 for better visibility without points
                 hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
             ))
 
+    # Freezing reference line
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
-    # --- GRID HIERARCHY WITH DASHED MINORS ---
+    # --- GRID HIERARCHY ---
     fig.update_layout(
-        title=f"<b>{title}</b>", hovermode="x unified", plot_bgcolor='white',
+        title=f"<b>{title}</b>", 
+        hovermode="x unified", 
+        plot_bgcolor='white',
         xaxis=dict(
-            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, 
+            range=[start_view, end_view], 
+            showline=True, 
+            mirror=True, 
+            linecolor='black',
+            showgrid=True, 
+            dtick="D1", 
+            gridcolor='DarkGray', 
+            gridwidth=1, 
             minor=dict(
-                dtick=6*60*60*1000, 
+                dtick=6*60*60*1000, # 6-hour minor ticks
                 showgrid=True, 
                 gridcolor='Gainsboro', 
-                griddash='dash'  # <--- THIS DASHES THE 6-HOUR LINES
+                griddash='dash'
             ),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
-            dtick=10, gridcolor='DarkGray',
+            title="Temperature (°F)", 
+            range=[-20, 80], 
+            showline=True, 
+            mirror=True, 
+            linecolor='black',
+            dtick=10, 
+            gridcolor='DarkGray',
             minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
         ),
-        height=600, margin=dict(r=150, t=50, b=50),
+        height=600, 
+        margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
+    # Vertical lines for Mondays
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
