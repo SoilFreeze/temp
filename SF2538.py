@@ -206,7 +206,13 @@ st.markdown(f"**{UPLOAD_NOTE}**")
 data = get_universal_portal_data(TARGET_PROJECT, PROJECT_START_DATE)
 
 if not data.empty:
-    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+    # 1. Update the tabs list to include "As-Built Plan"
+    tab_time, tab_depth, tab_table, tab_map = st.tabs([
+        "📈 Timeline Analysis", 
+        "📏 Depth Profile", 
+        "📋 Summary Table", 
+        "🗺️ As-Built Plan"
+    ])
 
     # --- TAB 1: TIMELINE ---
     with tab_time:
@@ -282,8 +288,20 @@ if not data.empty:
         st.dataframe(display_df, width='stretch', hide_index=True)
         
     with tab_map:
-        st.header("📑 As Built Drawing")
-        display_pdf("AsBuiltElizabeth.pdf")
+        st.subheader("Site As-Built Reference")
+        pdf_filename = "AsBuiltElizabeth.pdf"
+        
+        try:
+            with open(pdf_filename, "rb") as f:
+                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            
+            # Create an iframe to display the PDF
+            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf"></iframe>'
+            
+            st.markdown(pdf_display, unsafe_allow_code=True)
+            
+        except FileNotFoundError:
+            st.error(f"File '{pdf_filename}' not found. Please ensure the PDF is in the same directory as this script.")
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
 
