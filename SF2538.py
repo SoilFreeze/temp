@@ -289,39 +289,25 @@ if not data.empty:
         
         st.dataframe(display_df, width='stretch', hide_index=True)
         
-    # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
         st.subheader("Site As-Built Reference")
-        pdf_filename = "AsBuiltElizabeth.pdf"
+        img_filename = "AsBuiltElizabeth.jpg"
         
-        if os.path.exists(pdf_filename):
-            with open(pdf_filename, "rb") as f:
-                pdf_data = f.read()
-                base64_pdf = base64.b64encode(pdf_data).decode('utf-8')
+        if os.path.exists(img_filename):
+            # use_container_width=True makes it responsive to the screen size
+            st.image(img_filename, caption="As-Built Site Plan", use_container_width=True)
             
-            # We use an <object> tag instead of an <iframe>
-            # This is generally more compatible with Chrome's PDF viewer
-            pdf_display = f"""
-                <div style="display: flex; justify-content: center;">
-                    <object data="data:application/pdf;base64,{base64_pdf}" type="application/pdf" width="100%" height="1000px">
-                        <p>It appears your browser does not support PDFs. 
-                        <a href="data:application/pdf;base64,{base64_pdf}" download="{pdf_filename}">Click here to download the PDF.</a></p>
-                    </object>
-                </div>
-            """
-            
-            components.html(pdf_display, height=1000)
-            
-            # Fallback Download Button (always visible for convenience)
-            st.download_button(
-                label="📥 Download Full As-Built Plan",
-                data=pdf_data,
-                file_name=pdf_filename,
-                mime="application/pdf"
-            )
+            # Fallback download for the original high-res version
+            with open(img_filename, "rb") as file:
+                st.download_button(
+                    label="📥 Download High-Res Plan",
+                    data=file,
+                    file_name=img_filename,
+                    mime="image/jpeg"
+                )
         else:
-            st.error(f"File '{pdf_filename}' not found in the root directory.")
-            st.info("Please ensure the PDF is uploaded to the same folder as your Python script on GitHub.")
+            st.error(f"Image '{img_filename}' not found.")
+            st.info("Ensure the JPG is uploaded to the root folder on GitHub.")
             
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
