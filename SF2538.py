@@ -9,7 +9,7 @@ import re
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
-CURRENT_PROJECT_KEY = "2538" 
+CURRENT_PROJECT_KEY = "2538-Ferndale" 
 
 PROJECT_REGISTRY = {
     "2538": {
