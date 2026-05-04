@@ -288,25 +288,25 @@ if not data.empty:
         
         st.dataframe(display_df, width='stretch', hide_index=True)
         
-   with tab_map:
-    st.subheader("Site As-Built Reference")
-    pdf_filename = "AsBuiltElizabeth.pdf"
-    
-    try:
-        with open(pdf_filename, "rb") as f:
-            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    with tab_map:
+        st.subheader("Site As-Built Reference")
+        pdf_filename = "AsBuiltElizabeth.pdf"
         
-        # Use a data URI for the PDF
-        pdf_data = f"data:application/pdf;base64,{base64_pdf}"
-        
-        # Use components.html instead of st.markdown for better stability
-        components.html(
-            f'<iframe src="{pdf_data}" width="100%" height="1000" type="application/pdf"></iframe>',
-            height=1000,
-        )
-        
-    except FileNotFoundError:
-        st.error(f"File '{pdf_filename}' not found. Ensure it is uploaded to your GitHub repo.")
+        try:
+            with open(pdf_filename, "rb") as f:
+                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            
+            # Use a data URI for the PDF
+            pdf_data = f"data:application/pdf;base64,{base64_pdf}"
+            
+            # Use components.html instead of st.markdown for better stability
+            components.html(
+                f'<iframe src="{pdf_data}" width="100%" height="1000" type="application/pdf"></iframe>',
+                height=1000,
+            )
+            
+        except FileNotFoundError:
+            st.error(f"File '{pdf_filename}' not found. Ensure it is uploaded to your GitHub repo.")
         
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
