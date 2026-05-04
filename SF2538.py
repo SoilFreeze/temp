@@ -288,25 +288,35 @@ if not data.empty:
         
         st.dataframe(display_df, width='stretch', hide_index=True)
         
+    # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
         st.subheader("Site As-Built Reference")
-        pdf_filename = "AsBuiltElizabeth.pdf"
         
+        # Point directly to the static folder path
+        # Streamlit Cloud serves files in /static/ automatically
+        pdf_url = "static/AsBuiltElizabeth.pdf"
+        
+        # Use a standard iframe pointing to the URL
+        # This bypasses the "Blocked by Chrome" security issue
+        st.components.v1.html(
+            f"""
+            <iframe src="{pdf_url}" width="100%" height="1000px" style="border:none;">
+            </iframe>
+            """,
+            height=1000,
+        )
+    
+        # Fallback Download Button
         try:
-            with open(pdf_filename, "rb") as f:
-                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-            
-            # Use a data URI for the PDF
-            pdf_data = f"data:application/pdf;base64,{base64_pdf}"
-            
-            # Use components.html instead of st.markdown for better stability
-            components.html(
-                f'<iframe src="{pdf_data}" width="100%" height="1000" type="application/pdf"></iframe>',
-                height=1000,
-            )
-            
+            with open("static/AsBuiltElizabeth.pdf", "rb") as f:
+                st.download_button(
+                    label="PDF not loading? Click here to download",
+                    data=f,
+                    file_name="AsBuiltElizabeth.pdf",
+                    mime="application/pdf"
+                )
         except FileNotFoundError:
-            st.error(f"File '{pdf_filename}' not found. Ensure it is uploaded to your GitHub repo.")
+            st.warning("Ensure the PDF is inside a folder named 'static' in your repository.")
         
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
