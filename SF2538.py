@@ -5,7 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
-
+import os
 
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
