@@ -292,35 +292,36 @@ if not data.empty:
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
         st.subheader("Site As-Built Reference")
+        pdf_filename = "AsBuiltElizabeth.pdf"
         
-        # 1. The local path for Python to check if it exists
-        local_path = "static/AsBuiltElizabeth.pdf"
-        
-        # 2. The URL path the BROWSER uses to find the file
-        # On Streamlit Cloud, the path is usually /app/static/filename
-        pdf_url = "./app/static/AsBuiltElizabeth.pdf"
-    
-        if os.path.exists(local_path):
-            # We use 'components.html' to create a safe space for the PDF
-            # Adding 'sandbox' tells Chrome this is a restricted, safe element
-            components.html(
-                f"""
-                <iframe 
-                    src="{pdf_url}" 
-                    width="100%" 
-                    height="1000px" 
-                    style="border:none;"
-                    sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts">
-                </iframe>
-                """,
-                height=1000,
-            )
+        if os.path.exists(pdf_filename):
+            with open(pdf_filename, "rb") as f:
+                pdf_data = f.read()
+                base64_pdf = base64.b64encode(pdf_data).decode('utf-8')
             
-            # Fallback link in case the user has a very restrictive browser extension
-            st.markdown(f"🔒 *Chrome blocking the embed?* [**Click here to open PDF directly**]({pdf_url})")
+            # We use an <object> tag instead of an <iframe>
+            # This is generally more compatible with Chrome's PDF viewer
+            pdf_display = f"""
+                <div style="display: flex; justify-content: center;">
+                    <object data="data:application/pdf;base64,{base64_pdf}" type="application/pdf" width="100%" height="1000px">
+                        <p>It appears your browser does not support PDFs. 
+                        <a href="data:application/pdf;base64,{base64_pdf}" download="{pdf_filename}">Click here to download the PDF.</a></p>
+                    </object>
+                </div>
+            """
+            
+            components.html(pdf_display, height=1000)
+            
+            # Fallback Download Button (always visible for convenience)
+            st.download_button(
+                label="📥 Download Full As-Built Plan",
+                data=pdf_data,
+                file_name=pdf_filename,
+                mime="application/pdf"
+            )
         else:
-            st.error("⚠️ PDF not found in the 'static' folder.")
-            st.code("Current folder structure should be: your_repo/static/AsBuiltElizabeth.pdf")
+            st.error(f"File '{pdf_filename}' not found in the root directory.")
+            st.info("Please ensure the PDF is uploaded to the same folder as your Python script on GitHub.")
             
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
