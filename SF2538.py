@@ -72,42 +72,34 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, start_date_str):
     if client is None: return pd.DataFrame()
 
-    # Check if Start_Date exists in the table schema first to avoid the 400 error
-    table_ref = client.get_table(METADATA_TABLE)
-    column_names = [field.name for field in table_ref.schema]
-    
-    # Build conditional join logic
-    if "Start_Date" in column_names and "End_Date" in column_names:
-        date_filter = """
-            AND r.timestamp >= COALESCE(SAFE_CAST(m.Start_Date AS TIMESTAMP), '2000-01-01')
-            AND r.timestamp <= COALESCE(SAFE_CAST(m.End_Date AS TIMESTAMP), '2099-12-31')
-        """
-    else:
-        date_filter = "" # Fallback if columns are missing
+    # Define the view path
+    MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 
     query = f"""
         SELECT 
-            r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth, m.Project
-        FROM (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m 
-            ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))
-            {date_filter}
-        WHERE CAST(m.Project AS STRING) = '{project_id}'
-        AND r.timestamp >= '{start_date_str}'
-        ORDER BY r.timestamp ASC
+            NodeNum, 
+            timestamp, 
+            temperature,
+            Location, 
+            Bank, 
+            Depth, 
+            Project
+        FROM `{MASTER_VIEW}`
+        WHERE CAST(Project AS STRING) = '{project_id}'
+        AND timestamp >= '{start_date_str}'
+        AND LOWER(approve) = 'TRUE'  -- This strictly filters for approved data
+        ORDER BY timestamp ASC
     """
     try:
         df = client.query(query).to_dataframe()
+        
+        # Clean up strings for display
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
+        
         return df
     except Exception as e:
-        st.error(f"BQ Query Error: {e}")
+        st.error(f"Error fetching from master_data: {e}")
         return pd.DataFrame()
 
 ########################
