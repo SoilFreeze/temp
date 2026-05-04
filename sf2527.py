@@ -5,12 +5,11 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
-
+import os
 
 #################################################################
-# 1. CENTRAL PROJECT CONFIGURATION                              #
+# 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
-# CHANGE THESE TO SWITCH PROJECTS
 CURRENT_PROJECT_KEY = "2527" 
 
 PROJECT_REGISTRY = {
@@ -19,7 +18,16 @@ PROJECT_REGISTRY = {
         "location": "Elizabeth, NJ",
         "start_date": "2026-04-24 00:00:00",
         "timezone": "America/New_York",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time."
+        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.",
+        "as_built_file": "AsBuiltElizabeth.jpg"
+    },
+    "2538-Ferndale": {
+        "name": "Pump Station 16 Upgrade",
+        "location": "Ferndale, WA",
+        "start_date": "2026-04-22 00:00:00",
+        "timezone": "America/Los_Angeles",
+        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
+        "as_built_file": "AsBuiltElizabeth.jpg" 
     }
 }
 
@@ -32,11 +40,12 @@ PROJECT_START_DATE = active["start_date"]
 DISPLAY_TZ = active["timezone"]
 UPLOAD_NOTE = active["upload_note"]
 UNIT_LABEL = active.get("unit", "°F")
+AS_BUILT_FILE = active.get("as_built_file", None)
 
 # Database Globals
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata" 
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
 st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
@@ -188,7 +197,12 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
 
     return fig
-
+    
+def display_pdf(file_path):
+    with open(file_path, "rb") as f:
+        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
 ###########################
 # 4. MAIN UI LAYOUT       #
 ###########################
@@ -202,7 +216,13 @@ st.markdown(f"**{UPLOAD_NOTE}**")
 data = get_universal_portal_data(TARGET_PROJECT, PROJECT_START_DATE)
 
 if not data.empty:
-    tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
+    # 1. Update the tabs list to include "As-Built Plan"
+    tab_time, tab_depth, tab_table, tab_map = st.tabs([
+        "📈 Timeline Analysis", 
+        "📏 Depth Profile", 
+        "📋 Summary Table", 
+        "🗺️ As-Built Plan"
+    ])
 
     # --- TAB 1: TIMELINE ---
     with tab_time:
@@ -276,6 +296,42 @@ if not data.empty:
         display_df = latest.sort_values(['Location', 'Bank', 'Depth_Sort'])[['Location', 'Bank', 'Depth', 'NodeNum', 'Current Temp', 'Last Reading']]
         
         st.dataframe(display_df, width='stretch', hide_index=True)
-
+        
+    # --- TAB 4: AS-BUILT PLAN ---
+    with tab_map:
+        if AS_BUILT_FILE:
+            st.subheader(f"Site Plan: {PROJECT_NAME}")
+            
+            if os.path.exists(AS_BUILT_FILE):
+                # Check file extension to handle JPG and PDF differently
+                file_ext = os.path.splitext(AS_BUILT_FILE)[1].lower()
+    
+                if file_ext in [".jpg", ".jpeg", ".png"]:
+                    st.image(AS_BUILT_FILE, use_container_width=True)
+                
+                elif file_ext == ".pdf":
+                    # Use the Base64 method for PDFs if preferred
+                    with open(AS_BUILT_FILE, "rb") as f:
+                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
+                    st.components.v1.html(pdf_display, height=1000)
+    
+                # Universal Download Button
+                with open(AS_BUILT_FILE, "rb") as file:
+                    st.download_button(
+                        label=f"📥 Download {os.path.basename(AS_BUILT_FILE)}",
+                        data=file,
+                        file_name=AS_BUILT_FILE,
+                        mime="application/octet-stream"
+                    )
+            else:
+                st.error(f"File '{AS_BUILT_FILE}' defined in registry but not found in repository.")
+        else:
+            st.info("No As-Built plan has been configured for this project.")
+            
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
+
+
+
+   
