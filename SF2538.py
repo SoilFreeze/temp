@@ -27,7 +27,7 @@ PROJECT_REGISTRY = {
         "start_date": "2026-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
         "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
-        "as_built_file": "AsBuiltElizabeth.jpg" 
+        "as_built_file": "AsBuiltFerndale.jpg" 
     }
 }
 
@@ -72,26 +72,26 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, start_date_str):
     if client is None: return pd.DataFrame()
 
-    # Define the view path
+    # Match your BigQuery path exactly
     MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 
     query = f"""
         SELECT 
-            NodeNum, 
-            timestamp, 
-            temperature,
-            Location, 
-            Bank, 
-            Depth, 
-            Project
+            NodeNum, timestamp, temperature,
+            Location, Bank, Depth, Project
         FROM `{MASTER_VIEW}`
-        WHERE CAST(Project AS STRING) = '{project_id}'
+        WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM('{project_id}'))
         AND timestamp >= '{start_date_str}'
-        AND LOWER(approve) = 'TRUE'  -- This strictly filters for approved data
+        AND UPPER(TRIM(CAST(approve AS STRING))) = 'TRUE'
         ORDER BY timestamp ASC
     """
     try:
+        # Run query and convert to dataframe
         df = client.query(query).to_dataframe()
+        
+        # Check if the dataframe is empty here for debugging
+        if df.empty:
+            st.warning(f"BigQuery returned 0 rows for {project_id} after {start_date_str}. Check if 'Project' column matches exactly.")
         
         # Clean up strings for display
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
@@ -99,7 +99,7 @@ def get_universal_portal_data(project_id, start_date_str):
         
         return df
     except Exception as e:
-        st.error(f"Error fetching from master_data: {e}")
+        st.error(f"BQ View Query Error: {e}")
         return pd.DataFrame()
 
 ########################
