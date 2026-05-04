@@ -5,9 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
-import base64
-import streamlit.components.v1 as components # Add this import
-import os
+
 
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
@@ -15,13 +13,21 @@ import os
 CURRENT_PROJECT_KEY = "2538-Ferndale" 
 
 PROJECT_REGISTRY = {
+    "2527": {
+        "name": "SJI Erie St Remediation",
+        "location": "Elizabeth, NJ",
+        "start_date": "2026-04-24 00:00:00",
+        "timezone": "America/New_York",
+        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.",
+        "as_built_file": "AsBuiltElizabeth.jpg"
+    },
     "2538-Ferndale": {
         "name": "Pump Station 16 Upgrade",
         "location": "Ferndale, WA",
         "start_date": "2026-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time."
-        "as_built_file": "AsBuiltElizabeth.jpg" 
+        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
+        "as_built_file": "AsBuiltFerndale.jpg" # Added comma here
     }
 }
 
