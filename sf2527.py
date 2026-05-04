@@ -197,15 +197,18 @@ st.caption(f"Project {TARGET_PROJECT} Status")
 st.caption(f"Location: {PROJECT_LOCATION} | Timezone: {DISPLAY_TZ}")
 st.markdown(f"**{UPLOAD_NOTE}**")
 
+# Get data using centralized variables
 data = get_universal_portal_data(TARGET_PROJECT, PROJECT_START_DATE)
 
 if not data.empty:
     tab_time, tab_depth, tab_table = st.tabs(["📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table"])
 
+    # --- TAB 1: TIMELINE ---
     with tab_time:
         project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
         weeks_view = st.slider("Weeks to View", 1, 12, 4, key="weeks_slider")
         end_view = pd.Timestamp.now(tz='UTC')
+        # Ensure we don't try to view before the project actually started
         start_view = max(project_start_ts, end_view - timedelta(weeks=weeks_view))
         
         for loc in sorted(data['Location'].unique()):
@@ -213,7 +216,65 @@ if not data.empty:
                 fig = build_high_speed_graph(data[data['Location'] == loc], f"{loc} Timeline", start_view, end_view, DISPLAY_TZ)
                 st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
 
-    # (Depth and Table tabs use same logic, referencing DISPLAY_TZ and TARGET_PROJECT)
-    # ... [Rest of tab logic remains same, substituting hardcoded values for variables]
+    # --- TAB 2: DEPTH PROFILE ---
+    with tab_depth:
+        # Convert Depth to numbers for vertical plotting
+        data['Depth_Num'] = pd.to_numeric(data['Depth'], errors='coerce')
+        depth_only = data.dropna(subset=['Depth_Num']).copy()
+        
+        for loc in sorted(depth_only['Location'].unique()):
+            with st.expander(f"📏 {loc} Vertical Profile"):
+                loc_data = depth_only[depth_only['Location'] == loc].copy()
+                fig_d = go.Figure()
+                
+                # Plot "Snapshots" for every Monday since the project started
+                project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
+                mondays = pd.date_range(start=project_start_ts, end=pd.Timestamp.now(tz='UTC'), freq='W-MON')
+                
+                for m_date in mondays:
+                    target_ts = m_date.replace(hour=6, minute=0, second=0)
+                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                    
+                    if not window.empty:
+                        # Get the closest reading for each sensor in that window
+                        snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
+                        
+                        fig_d.add_trace(go.Scatter(
+                            x=snap_df['temperature'], 
+                            y=snap_df['Depth_Num'], 
+                            mode='lines+markers', 
+                            name=target_ts.strftime('%m/%d/%y'),
+                            customdata=snap_df[['timestamp', 'NodeNum']],
+                            hovertemplate=f"<b>%{{customdata[0]|%b %d, %H:00}}</b><br>Sensor: %{{customdata[1]}}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{UNIT_LABEL}<extra></extra>"
+                        ))
+                
+                # Freezing Reference line for Depth Profile
+                fig_d.add_vline(x=32, line_dash="dash", line_color="RoyalBlue")
+                
+                fig_d.update_layout(
+                    plot_bgcolor='white', 
+                    height=600, 
+                    yaxis=dict(range=[int(((loc_data['Depth_Num'].max()//10)+1)*10), 0], title="Depth (ft)"), 
+                    xaxis=dict(range=[-20, 80], title=f"Temperature ({UNIT_LABEL})"), 
+                    hovermode="closest"
+                )
+                st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
+
+    # --- TAB 3: SUMMARY TABLE ---
+    with tab_table:
+        # Get the very latest reading for every sensor
+        latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        
+        # Format columns for display
+        latest['Depth_Sort'] = pd.to_numeric(latest['Depth'], errors='coerce').fillna(0)
+        latest['Last Reading'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%b %d, %H:%M')
+        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
+        
+        # Filter and sort the table
+        display_df = latest.sort_values(['Location', 'Bank', 'Depth_Sort'])[['Location', 'Bank', 'Depth', 'NodeNum', 'Current Temp', 'Last Reading']]
+        
+        st.dataframe(display_df, width='stretch', hide_index=True)
+
 else:
-    st.info(f"Awaiting data for {PROJECT_NAME} (Started {PROJECT_START_DATE})...")
+    st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
