@@ -291,29 +291,34 @@ if not data.empty:
     # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
         st.subheader("Site As-Built Reference")
+        pdf_filename = "AsBuiltElizabeth.pdf"
         
-        # Path relative to the script
-        local_path = "static/AsBuiltElizabeth.pdf"
-        # URL relative to the browser
-        public_url = "./app/static/AsBuiltElizabeth.pdf"
-    
-        import os
-        if os.path.exists(local_path):
-            # We use a container to force a specific width/height
-            st.components.v1.html(
-                f"""
-                <div style="width:100%; height:1000px;">
-                    <embed src="{public_url}" width="100%" height="100%" type="application/pdf">
-                </div>
-                """,
-                height=1000,
-            )
+        if os.path.exists(pdf_filename):
+            with open(pdf_filename, "rb") as f:
+                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
             
-            # Add a direct link in case the embed fails
-            st.markdown(f"🔗 [Open PDF in Full Screen]({public_url})")
+            # We embed the PDF as a data string inside a sandboxed iframe
+            # This is the most reliable way for files under 1MB
+            pdf_display = f"""
+                <iframe 
+                    src="data:application/pdf;base64,{base64_pdf}" 
+                    width="100%" 
+                    height="1000px" 
+                    type="application/pdf">
+                </iframe>
+            """
+            
+            components.html(pdf_display, height=1000)
+            
+            # Keep a download button as a fail-safe
+            st.download_button(
+                label="Download PDF Plan",
+                data=base64.b64decode(base64_pdf),
+                file_name=pdf_filename,
+                mime="application/pdf"
+            )
         else:
-            st.error(f"File not found at `{local_path}`. Please check your GitHub folder structure.")
-            st.info("Your repo should look like: `your-repo/static/AsBuiltElizabeth.pdf` (Check capitalization!)")
+            st.error(f"Could not find {pdf_filename} in the root directory.")
         
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
