@@ -9,22 +9,33 @@ import pytz
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
 #################################################################
-TARGET_PROJECT = "2538-Ferndale"    
-CLIENT_NAME = "Pump 16 Upgrade"     
-LOCATION_STAMP = "Ferndale, WA"     
-DISPLAY_TZ = "America/Los_Angeles"  
-UNIT_LABEL = "°F"                   
+CURRENT_PROJECT_KEY = "2538" 
 
+PROJECT_REGISTRY = {
+    "2538": {
+        "name": "Pump Station 16 Upgrade",
+        "location": "Ferndale, WA",
+        "start_date": "2026-04-22 00:00:00",
+        "timezone": "America/Los_Angeles",
+        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time."
+    }
+}
+
+# Extract variables for the active project
+active = PROJECT_REGISTRY[CURRENT_PROJECT_KEY]
+TARGET_PROJECT = CURRENT_PROJECT_KEY
+PROJECT_NAME = active["name"]
+PROJECT_LOCATION = active["location"]
+PROJECT_START_DATE = active["start_date"]
+DISPLAY_TZ = active["timezone"]
+UPLOAD_NOTE = active["upload_note"]
+UNIT_LABEL = active.get("unit", "°F")
+
+# Database Globals
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-
-# Updated to use snapshot as requested
 METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-
-PROJECT_VISIBILITY_MASKS = {
-    "2538-Ferndale": "2024-01-01 00:00:00" 
-}
 
 st.set_page_config(page_title=f"Project {TARGET_PROJECT} Portal", layout="wide")
 
