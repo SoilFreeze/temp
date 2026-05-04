@@ -21,6 +21,7 @@ PROJECT_REGISTRY = {
         "start_date": "2026-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
         "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time."
+        "as_built_file": "AsBuiltElizabeth.jpg"  # 
     }
 }
 
@@ -33,6 +34,7 @@ PROJECT_START_DATE = active["start_date"]
 DISPLAY_TZ = active["timezone"]
 UPLOAD_NOTE = active["upload_note"]
 UNIT_LABEL = active.get("unit", "°F")
+AS_BUILT_FILE = active.get("as_built_file", None)
 
 # Database Globals
 PROJECT_ID = "sensorpush-export"
@@ -289,25 +291,37 @@ if not data.empty:
         
         st.dataframe(display_df, width='stretch', hide_index=True)
         
+    # --- TAB 4: AS-BUILT PLAN ---
     with tab_map:
-        st.subheader("Site As-Built Reference")
-        img_filename = "AsBuiltElizabeth.jpg"
-        
-        if os.path.exists(img_filename):
-            # use_container_width=True makes it responsive to the screen size
-            st.image(img_filename, caption="As-Built Site Plan", use_container_width=True)
+        if AS_BUILT_FILE:
+            st.subheader(f"Site Plan: {PROJECT_NAME}")
             
-            # Fallback download for the original high-res version
-            with open(img_filename, "rb") as file:
-                st.download_button(
-                    label="📥 Download High-Res Plan",
-                    data=file,
-                    file_name=img_filename,
-                    mime="image/jpeg"
-                )
+            if os.path.exists(AS_BUILT_FILE):
+                # Check file extension to handle JPG and PDF differently
+                file_ext = os.path.splitext(AS_BUILT_FILE)[1].lower()
+    
+                if file_ext in [".jpg", ".jpeg", ".png"]:
+                    st.image(AS_BUILT_FILE, use_container_width=True)
+                
+                elif file_ext == ".pdf":
+                    # Use the Base64 method for PDFs if preferred
+                    with open(AS_BUILT_FILE, "rb") as f:
+                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
+                    st.components.v1.html(pdf_display, height=1000)
+    
+                # Universal Download Button
+                with open(AS_BUILT_FILE, "rb") as file:
+                    st.download_button(
+                        label=f"📥 Download {os.path.basename(AS_BUILT_FILE)}",
+                        data=file,
+                        file_name=AS_BUILT_FILE,
+                        mime="application/octet-stream"
+                    )
+            else:
+                st.error(f"File '{AS_BUILT_FILE}' defined in registry but not found in repository.")
         else:
-            st.error(f"Image '{img_filename}' not found.")
-            st.info("Ensure the JPG is uploaded to the root folder on GitHub.")
+            st.info("No As-Built plan has been configured for this project.")
             
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
