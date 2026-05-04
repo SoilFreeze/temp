@@ -5,6 +5,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import re
+import base64
 
 #################################################################
 # 1. CONFIGURATION: Project 2538-Ferndale                       #
@@ -186,7 +187,12 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
 
     return fig
-
+    
+def display_pdf(file_path):
+    with open(file_path, "rb") as f:
+        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
 ###########################
 # 4. MAIN UI LAYOUT       #
 ###########################
@@ -274,6 +280,13 @@ if not data.empty:
         display_df = latest.sort_values(['Location', 'Bank', 'Depth_Sort'])[['Location', 'Bank', 'Depth', 'NodeNum', 'Current Temp', 'Last Reading']]
         
         st.dataframe(display_df, width='stretch', hide_index=True)
-
+        
+    with tab_map:
+        st.header("📑 As Built Drawing")
+        display_pdf("AsBuiltElizabeth.pdf")
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
+
+
+
+   
