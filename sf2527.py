@@ -8,7 +8,7 @@ import re
 import os
 
 #################################################################
-# 1. CONFIGURATION: Project 2538-Ferndale                       #
+# 1. CONFIGURATION: Project 2527-Ferndale                       #
 #################################################################
 CURRENT_PROJECT_KEY = "2527" 
 
@@ -27,7 +27,7 @@ PROJECT_REGISTRY = {
         "start_date": "2026-04-22 00:00:00",
         "timezone": "America/Los_Angeles",
         "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
-        "as_built_file": "AsBuiltElizabeth.jpg" 
+        "as_built_file": "AsBuiltFerndale.jpg" 
     }
 }
 
@@ -72,42 +72,34 @@ client = get_bq_client()
 def get_universal_portal_data(project_id, start_date_str):
     if client is None: return pd.DataFrame()
 
-    # Check if Start_Date exists in the table schema first to avoid the 400 error
-    table_ref = client.get_table(METADATA_TABLE)
-    column_names = [field.name for field in table_ref.schema]
-    
-    # Build conditional join logic
-    if "Start_Date" in column_names and "End_Date" in column_names:
-        date_filter = """
-            AND r.timestamp >= COALESCE(SAFE_CAST(m.Start_Date AS TIMESTAMP), '2000-01-01')
-            AND r.timestamp <= COALESCE(SAFE_CAST(m.End_Date AS TIMESTAMP), '2099-12-31')
-        """
-    else:
-        date_filter = "" # Fallback if columns are missing
+    # Match your BigQuery path exactly
+    MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data"
 
     query = f"""
         SELECT 
-            r.NodeNum, r.timestamp, r.temperature,
-            m.Location, m.Bank, m.Depth, m.Project
-        FROM (
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
-            UNION ALL
-            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
-        ) AS r
-        INNER JOIN `{METADATA_TABLE}` AS m 
-            ON UPPER(TRIM(r.NodeNum)) = UPPER(TRIM(m.NodeNum))
-            {date_filter}
-        WHERE CAST(m.Project AS STRING) = '{project_id}'
-        AND r.timestamp >= '{start_date_str}'
-        ORDER BY r.timestamp ASC
+            NodeNum, timestamp, temperature,
+            Location, Bank, Depth, Project
+        FROM `{MASTER_VIEW}`
+        WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM('{project_id}'))
+        AND timestamp >= '{start_date_str}'
+        AND UPPER(TRIM(CAST(approve AS STRING))) = 'TRUE'
+        ORDER BY timestamp ASC
     """
     try:
+        # Run query and convert to dataframe
         df = client.query(query).to_dataframe()
+        
+        # Check if the dataframe is empty here for debugging
+        if df.empty:
+            st.warning(f"BigQuery returned 0 rows for {project_id} after {start_date_str}. Check if 'Project' column matches exactly.")
+        
+        # Clean up strings for display
         df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
         df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
+        
         return df
     except Exception as e:
-        st.error(f"BQ Query Error: {e}")
+        st.error(f"BQ View Query Error: {e}")
         return pd.DataFrame()
 
 ########################
@@ -115,20 +107,27 @@ def get_universal_portal_data(project_id, start_date_str):
 ########################
 
 def build_high_speed_graph(df, title, start_view, end_view, display_tz):
-    if df.empty: return go.Figure().update_layout(title="No data available.")
+    """
+    Generates a Plotly timeline graph with lines only and a 12-hour gap threshold.
+    """
+    if df.empty: 
+        return go.Figure().update_layout(title="No data available.")
 
     pdf = df.copy()
+    # Convert timestamps to the project's local timezone
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Sorting and Labeling Logic
+    # Sorting and Labeling Logic for Legend Grouping
     def get_sort_info(r):
         b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: return f"Bank {b}", 0.0
+        if b and b.lower() not in ['nan', 'none']: 
+            return f"Bank {b}", 0.0
         if d and d.lower() not in ['nan', 'none']:
             try:
                 num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
                 return f"{d}ft", num
-            except: return f"{d}ft", 999.0
+            except: 
+                return f"{d}ft", 999.0
         return f"Node {r['NodeNum']}", 1000.0
 
     pdf[['depth_label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
@@ -146,50 +145,70 @@ def build_high_speed_graph(df, title, start_view, end_view, display_tz):
         for j, sn in enumerate(sensors_at_depth):
             s_df = depth_data[depth_data['NodeNum'] == sn].sort_values('timestamp')
             
-            # 6h Gap Detection
+            # --- 12h GAP DETECTION ---
+            # Calculates difference between readings; if > 12 hours, inserts a None to break the line
             s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 6.0
+            gap_mask = s_df['gap_hrs'] > 12.0 
             if gap_mask.any():
                 gaps = s_df[gap_mask].copy()
                 gaps['temperature'] = None
                 gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
                 s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
+            # --- TRACE CONFIGURATION (LINES ONLY) ---
             fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], y=s_df['temperature'], 
-                name=f"{d_lbl} ({sn})", legendgroup=d_lbl,
+                x=s_df['timestamp'], 
+                y=s_df['temperature'], 
+                name=f"{d_lbl} ({sn})", 
+                legendgroup=d_lbl,
                 showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines+markers', connectgaps=False, 
-                line=dict(color=color, width=1.5),
-                marker=dict(size=4, opacity=0.8),
+                mode='lines',  # Removed '+markers' to hide points
+                connectgaps=False, 
+                line=dict(color=color, width=2.0), # Width 2.0 for better visibility without points
                 hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
             ))
 
+    # Freezing reference line
     fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
 
-    # --- GRID HIERARCHY WITH DASHED MINORS ---
+    # --- GRID HIERARCHY ---
     fig.update_layout(
-        title=f"<b>{title}</b>", hovermode="x unified", plot_bgcolor='white',
+        title=f"<b>{title}</b>", 
+        hovermode="x unified", 
+        plot_bgcolor='white',
         xaxis=dict(
-            range=[start_view, end_view], showline=True, mirror=True, linecolor='black',
-            showgrid=True, dtick="D1", gridcolor='DarkGray', gridwidth=1, 
+            range=[start_view, end_view], 
+            showline=True, 
+            mirror=True, 
+            linecolor='black',
+            showgrid=True, 
+            dtick="D1", 
+            gridcolor='DarkGray', 
+            gridwidth=1, 
             minor=dict(
-                dtick=6*60*60*1000, 
+                dtick=6*60*60*1000, # 6-hour minor ticks
                 showgrid=True, 
                 gridcolor='Gainsboro', 
-                griddash='dash'  # <--- THIS DASHES THE 6-HOUR LINES
+                griddash='dash'
             ),
             tickformat='%b %d\n%H:%M'
         ),
         yaxis=dict(
-            title="Temperature (°F)", range=[-20, 80], showline=True, mirror=True, linecolor='black',
-            dtick=10, gridcolor='DarkGray',
+            title="Temperature (°F)", 
+            range=[-20, 80], 
+            showline=True, 
+            mirror=True, 
+            linecolor='black',
+            dtick=10, 
+            gridcolor='DarkGray',
             minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
         ),
-        height=600, margin=dict(r=150, t=50, b=50),
+        height=600, 
+        margin=dict(r=150, t=50, b=50),
         legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
     )
 
+    # Vertical lines for Mondays
     mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
                              end=end_view.tz_convert(display_tz).ceil('D'), 
                              freq='W-MON', tz=display_tz)
@@ -331,7 +350,3 @@ if not data.empty:
             
 else:
     st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
-
-
-
-   
