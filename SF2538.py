@@ -255,7 +255,55 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
             sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
             st.divider()
+
+def render_depth_profile_tab(full_p_df):
+    st.subheader("📏 Vertical Temperature Profile")
+    
+    # Ensure Depth is numeric for proper Y-axis scaling
+    full_p_df['Depth_Num'] = pd.to_numeric(full_p_df['Depth'], errors='coerce')
+    depth_only = full_p_df.dropna(subset=['Depth_Num', 'Location']).copy()
+    
+    if depth_only.empty:
+        st.info("Vertical profile data is not available for this project.")
+        return
+
+    for loc in sorted(depth_only['Location'].unique()):
+        with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
+            loc_data = depth_only[depth_only['Location'] == loc].copy()
+            fig_d = go.Figure()
             
+            # Weekly Snapshots (Last 4 Mondays at 6 AM)
+            mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+            for m_date in mondays:
+                target_ts = m_date.replace(hour=6, minute=0, second=0)
+                window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                 (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                if not window.empty:
+                    snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
+                    fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y'), line=dict(shape='spline', smoothing=0.5)))
+
+            # 1. DYNAMIC AXIS CALCULATIONS
+            max_sensor_depth = loc_data['Depth_Num'].max()
+            # Rounds to the next 40ft increment
+            y_limit = int(((max_sensor_depth // 40) + 1) * 40) if pd.notnull(max_sensor_depth) else 40
+            
+            # Expanded X-scale if data exceeds 60F
+            max_temp_seen = loc_data['temperature'].max()
+            x_limit = 80 if max_temp_seen > 60 else 60
+
+            # 2. MEDIUM BLUE DASHED FREEZING LINE
+            fig_d.add_vline(x=32, line_width=2.5, line_dash="dash", line_color="MediumBlue", annotation_text="32°F FREEZE", annotation_position="top left", layer="above")
+            
+            # 3. ENGINEERING LAYOUT (FULLY FRAMED)
+            fig_d.update_layout(
+                plot_bgcolor='white', height=750, 
+                margin=dict(r=50, l=50, t=50, b=50), # Padding for the frame
+                xaxis=dict(title="Temperature (°F)", range=[-20, x_limit], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linewidth=2, linecolor='black'),
+                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='Silver', showline=True, mirror=True, linewidth=2, linecolor='black'),
+                legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5)
+            )
+            st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
+
 def render_client_portal():
     """Main portal logic for Job Number aggregation and tab routing."""
     client = get_bq_client()
@@ -273,9 +321,10 @@ def render_client_portal():
     primary_meta = proj_registry.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
+    asbuilt_filename = primary_meta.get('AsBuiltFile')
     
     # Calculate Freezedown Duration
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     f_start_date = None
     day_count_text = ""
     if pd.notnull(primary_meta.get('Date_Freezedown')):
@@ -285,13 +334,8 @@ def render_client_portal():
 
     # 3. DATA FETCHING
     with st.spinner("Synchronizing official records..."):
-        all_phases = []
-        for p_id in proj_registry['Project']:
-            data = get_universal_portal_data(p_id) # Inherits client-mode filtering
-            if not data.empty:
-                all_phases.append(data)
-        
-        # Define the dataframe variable clearly to avoid NameErrors
+        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        # Use full_p_df consistently to avoid NameErrors
         full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
@@ -301,7 +345,7 @@ def render_client_portal():
     # 4. SINGLE HEADER SECTION
     st.title(f"📊 {display_name}")
     
-    # Official Status Bar (Aligned to Project Time)
+    # Official Status Bar
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
@@ -316,7 +360,6 @@ def render_client_portal():
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        # Variable name fixed from p_df to full_p_df
         render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
@@ -334,136 +377,12 @@ def render_client_portal():
                     loc_data, f"{loc} History", start_view, now_local_ts, 
                     "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
                 ), use_container_width=True)
-      
-    # --- TAB 0: SUMMARY ---
-    with tabs[0]:
-        render_summary_tab(p_df, "°F", local_tz)
-
-    # --- TAB 1: TIME vs TEMP (PASTED LOGIC) ---
-    with tabs[1]:
-        st.sidebar.subheader("📅 Timeline Controls")
-        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-        show_ref = st.sidebar.toggle("Show Progress Goals", value=True)
+          pass
         
-        now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-        start_view = now_local - timedelta(weeks=weeks_view)
-        
-        locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
-        for loc in locations:
-            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
-                loc_data = p_df[p_df['Location'] == loc].copy()
-                cid = f"{TARGET_JOB_NUMBER}-{loc}" if show_ref else None
-
-                fig = build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"{loc}: {weeks_view}-Week Trend", 
-                    start_view=start_view, 
-                    end_view=now_local, 
-                    unit_mode="Fahrenheit", 
-                    unit_label="°F", 
-                    display_tz=local_tz,
-                    f_start_date=f_start_date,
-                    curve_id=cid
-                )
-                st.plotly_chart(fig, use_container_width=True, key=f"time_{loc}")
-
+    
     # --- TAB 2: TEMP vs DEPTH PROFILE ---
     with tabs[2]:
-        st.subheader("📏 Vertical Temperature Profile")
-        
-        # Ensure Depth is numeric for proper Y-axis scaling
-        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
-        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
-        
-        if depth_only.empty:
-            st.info("Vertical profile data is not available for this project.")
-        else:
-            for loc in sorted(depth_only['Location'].unique()):
-                with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
-                    loc_data = depth_only[depth_only['Location'] == loc].copy()
-                    fig_d = go.Figure()
-                    
-                    # Generate Weekly Snapshots (Last 4 Mondays at 06:00 AM)
-                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
-                    
-                    for m_date in mondays:
-                        target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                         (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                        
-                        if not window.empty:
-                            snap_df = (
-                                window.assign(diff=(window['timestamp'] - target_ts).abs())
-                                .sort_values(['NodeNum', 'diff'])
-                                .drop_duplicates('NodeNum')
-                                .sort_values('Depth_Num')
-                            )
-                            
-                            fig_d.add_trace(go.Scatter(
-                                x=snap_df['temperature'], 
-                                y=snap_df['Depth_Num'], 
-                                mode='lines+markers', 
-                                name=target_ts.strftime('%m/%d/%y'),
-                                line=dict(shape='spline', smoothing=0.5),
-                                hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
-                            ))
-
-                    # 1. DYNAMIC AXIS CALCULATIONS
-                    
-                    # Y-AXIS: Next 40ft increment after deepest point
-                    max_sensor_depth = loc_data['Depth_Num'].max()
-                    y_limit = int(((max_sensor_depth // 40) + 1) * 40) if pd.notnull(max_sensor_depth) else 40
-                    
-                    # X-AXIS: Go to 60, unless data is higher, then go to 80
-                    max_temp_seen = loc_data['temperature'].max()
-                    x_limit = 80 if max_temp_seen > 60 else 60
-
-                    # 2. MEDIUM BLUE DASHED FREEZING REFERENCE LINE
-                    fig_d.add_vline(
-                        x=32, 
-                        line_width=2.5, 
-                        line_dash="dash", 
-                        line_color="MediumBlue", 
-                        annotation_text="32°F FREEZE",
-                        annotation_position="top left",
-                        layer="above"
-                    )
-                    
-                    # 3. APPLY ENGINEERING LAYOUT WITH FULL FRAME
-                    fig_d.update_layout(
-                        plot_bgcolor='white', 
-                        height=750, 
-                        margin=dict(r=50, l=50, t=50, b=50), # Large cushion for full framing
-                        xaxis=dict(
-                            title="Temperature (°F)", 
-                            range=[-20, x_limit], # Dynamic Temp Scale
-                            dtick=10,
-                            showgrid=True, 
-                            gridcolor='Gainsboro', 
-                            showline=True, 
-                            mirror=True, # Right-side frame
-                            linewidth=2, 
-                            linecolor='black'
-                        ),
-                        yaxis=dict(
-                            title="Depth (ft)", 
-                            range=[y_limit, 0], # Dynamic Depth Scale (0 at top)
-                            dtick=10,
-                            showgrid=True, 
-                            gridcolor='Silver', 
-                            showline=True, 
-                            mirror=True, # Top frame
-                            linewidth=2, 
-                            linecolor='black'
-                        ),
-                        legend=dict(
-                            orientation="h", 
-                            y=-0.15, 
-                            xanchor="center", 
-                            x=0.5
-                        )
-                    )
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
+        render_depth_profile_tab(full_p_df)
     
     with tabs[3]:
         # Verified Data Summary Table
@@ -471,6 +390,7 @@ def render_client_portal():
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
+        pass
        
     # --- TAB 4: AS BUILT PLAN ---
     with tabs[4]:
@@ -503,6 +423,9 @@ def render_client_portal():
                 with st.expander("Diagnostic Info"):
                     st.write(f"Current Directory: `{os.getcwd()}`")
                     st.write(f"Files in root: `{os.listdir('.')}`")
+
+            pass
+            
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
 
