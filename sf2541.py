@@ -4,355 +4,240 @@ import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
+import time
 import re
-import os
 
-#################################################################
-# 1. CONFIGURATION: Project 2541-BlackJack                     #
-#################################################################
-CURRENT_PROJECT_KEY = "2541-Blackjack" 
+######################
+# 1. CONFIGURATION   #
+######################
 
-
-
-PROJECT_REGISTRY = {
-    "2541-Blackjack": {
-        "name": "SR 16/SR 160/Kitsap County Fish Passage Barriers Remove Fish Barriers",
-        "location": "Blackjack Creek, Port Orchard, WA",
-        "start_date": "2026-04-24 00:00:00",
-        "timezone": "America/Los_Angeles",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.",
-        "as_built_file": "AsBuiltBlackjack.jpg"
-    },
-    "2538-Ferndale": {
-        "name": "Pump Station 16 Upgrade",
-        "location": "Ferndale, WA",
-        "start_date": "2026-04-22 00:00:00",
-        "timezone": "America/Los_Angeles",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
-        "as_built_file": "AsBuiltFerndale.jpg" 
-    }
-}
-
-# Extract variables for the active project
-active = PROJECT_REGISTRY[CURRENT_PROJECT_KEY]
-TARGET_PROJECT = CURRENT_PROJECT_KEY
-PROJECT_NAME = active["name"]
-PROJECT_LOCATION = active["location"]
-PROJECT_START_DATE = active["start_date"]
-DISPLAY_TZ = active["timezone"]
-UPLOAD_NOTE = active["upload_note"]
-UNIT_LABEL = active.get("unit", "°F")
-AS_BUILT_FILE = active.get("as_built_file", None)
-
-# Database Globals
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
 OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-
-st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
+# Note: Ensure project_registry is the source of truth for metadata
+METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry" 
 
 @st.cache_resource
 def get_bq_client():
+    """Initializes BigQuery client with necessary scopes for federated tables."""
     try:
         if "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
+            SCOPES = [
+                "https://www.googleapis.com/auth/bigquery",
+                "https://www.googleapis.com/auth/drive.readonly"
+            ]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"❌ Authentication Failed: {e}")
         return None
 
-client = get_bq_client()
 ############################
 # 2. DATA ENGINE LOGIC     #
 ############################
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, start_date_str):
+def get_universal_portal_data(project_id, view_mode="engineering"):
+    """Robust data fetcher with strict masking and approval logic."""
+    client = get_bq_client()
     if client is None: return pd.DataFrame()
 
-    # Match your BigQuery path exactly
-    MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data"
+    if view_mode == "client":
+        # Only Approved (TRUE) AND NOT Masked
+        query_filter = """
+            AND rej.approve = 'TRUE'
+            AND NOT EXISTS (
+                SELECT 1 FROM `{OVERRIDE_TABLE}` m 
+                WHERE m.NodeNum = r.NodeNum 
+                AND m.timestamp = TIMESTAMP_TRUNC(r.timestamp, HOUR)
+                AND m.approve = 'MASKED'
+            )
+        """
+    else:
+        # Engineering view: See all except rejected/masked
+        query_filter = "AND (rej.approve IS NULL OR rej.approve NOT IN ('FALSE', 'MASKED'))"
 
     query = f"""
         SELECT 
-            NodeNum, timestamp, temperature,
-            Location, Bank, Depth, Project
-        FROM `{MASTER_VIEW}`
-        WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM('{project_id}'))
-        AND timestamp >= '{start_date_str}'
-        AND UPPER(TRIM(CAST(approve AS STRING))) = 'TRUE'
-        ORDER BY timestamp ASC
+            r.NodeNum, r.timestamp, r.temperature,
+            m.Location, m.Bank, m.Depth, m.Project
+        FROM (
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush`
+            UNION ALL
+            SELECT NodeNum, timestamp, temperature FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord`
+        ) AS r
+        INNER JOIN `{METADATA_TABLE}` AS m ON r.NodeNum = m.NodeNum
+        LEFT JOIN `{OVERRIDE_TABLE}` AS rej 
+            ON r.NodeNum = rej.NodeNum 
+            AND TIMESTAMP_TRUNC(r.timestamp, HOUR) = rej.timestamp
+        WHERE m.Project = @project_id
+        {query_filter}
+        ORDER BY r.timestamp ASC
     """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)]
+    )
     try:
-        # Run query and convert to dataframe
-        df = client.query(query).to_dataframe()
-        
-        # Check if the dataframe is empty here for debugging
-        if df.empty:
-            st.warning(f"BigQuery returned 0 rows for {project_id} after {start_date_str}. Check if 'Project' column matches exactly.")
-        
-        # Clean up strings for display
-        df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
-        df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
-        
-        return df
+        return client.query(query, job_config=job_config).to_dataframe()
     except Exception as e:
-        st.error(f"BQ View Query Error: {e}")
+        st.error(f"⚠️ BigQuery Query Error: {e}")
         return pd.DataFrame()
+    
+########################
+#  PROJECT BY NUMBER   #
+########################
+
+def get_project_by_job_number(job_number):
+    """Safely maps a numeric prefix to a full registry record."""
+    client = get_bq_client()
+    if not job_number or client is None: return None
+    # Use parameterization to prevent SQL injection
+    query = f"SELECT * FROM `{METADATA_TABLE}` WHERE Project LIKE @job_num LIMIT 1"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", f"{job_number}%")]
+    )
+    try:
+        df = client.query(query, job_config=job_config).to_dataframe()
+        return df.iloc[0].to_dict() if not df.empty else None
+    except:
+        return None
+
+# UI INITIALIZATION
+st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
+st.sidebar.title("❄️ SoilFreeze Lab")
+
+page = st.sidebar.selectbox("Navigation", ["Summary", "Time vs Temp", "Sensor Status", "Depth Charts", "Client Portal", "Admin Tools"])
+
+st.sidebar.divider()
+st.sidebar.subheader("🎯 Project Finder")
+job_input = st.sidebar.text_input("Enter Job Number", placeholder="e.g. 2538")
+
+# Session State for Selection
+if job_input:
+    match = get_project_by_job_number(job_input)
+    if match:
+        st.session_state['selected_project'] = match['Project']
+        st.session_state['project_metadata'] = match
+        st.sidebar.success(f"Connected: {match['Project']}")
+    else:
+        st.sidebar.error("Job number not recognized.")
+        st.session_state['selected_project'] = None
+else:
+    # Use standard dropdown as fallback
+    client = get_bq_client()
+    if client:
+        proj_list = client.query(f"SELECT DISTINCT Project FROM `{METADATA_TABLE}`").to_dataframe()
+        selected = st.sidebar.selectbox("Or Select Manually", ["None"] + sorted(proj_list['Project'].tolist()))
+        if selected != "None":
+            st.session_state['selected_project'] = selected
+            st.session_state['project_metadata'] = get_project_by_job_number(selected.split('-')[0])
+
+# Settings
+st.sidebar.divider()
+unit_mode = st.sidebar.radio("Display Units", ["Fahrenheit", "Celsius"], horizontal=True)
+unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
+display_tz = st.sidebar.selectbox("Timezone", ["UTC", "US/Eastern", "US/Pacific"], index=2)
 
 ########################
 # 3. GRAPHING ENGINE   #
 ########################
 
-def build_high_speed_graph(df, title, start_view, end_view, display_tz):
-    """
-    Generates a Plotly timeline graph with lines only and a 12-hour gap threshold.
-    """
-    if df.empty: 
-        return go.Figure().update_layout(title="No data available.")
-
+def build_robust_graph(df, title, start_view, end_view, unit_mode, unit_label, display_tz, f_start_date=None, job_num=None):
+    if df.empty: return go.Figure().update_layout(title="No data available.")
+    
     pdf = df.copy()
-    # Convert timestamps to the project's local timezone
+    # Unit conversion
+    if unit_mode == "Celsius":
+        pdf['temperature'] = (pdf['temperature'] - 32) * 5/9
+    
+    # Timezone conversion
     pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
     
-    # Sorting and Labeling Logic for Legend Grouping
-    def get_sort_info(r):
-        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: 
-            return f"Bank {b}", 0.0
-        if d and d.lower() not in ['nan', 'none']:
-            try:
-                num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
-                return f"{d}ft", num
-            except: 
-                return f"{d}ft", 999.0
-        return f"Node {r['NodeNum']}", 1000.0
-
-    pdf[['depth_label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
     fig = go.Figure()
-    
-    unique_depths = pdf[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-    for i, (_, d_row) in enumerate(unique_depths.iterrows()):
-        d_lbl = d_row['depth_label']
-        depth_data = pdf[pdf['depth_label'] == d_lbl]
-        color = colors[i % len(colors)]
-        sensors_at_depth = depth_data['NodeNum'].unique()
-        
-        for j, sn in enumerate(sensors_at_depth):
-            s_df = depth_data[depth_data['NodeNum'] == sn].sort_values('timestamp')
-            
-            # --- 12h GAP DETECTION ---
-            # Calculates difference between readings; if > 12 hours, inserts a None to break the line
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 12.0 
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+    # Theoretical Goal Curve Lookup
+    if job_num and f_start_date:
+        client = get_bq_client()
+        ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE CurveID LIKE @jid ORDER BY Day"
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("jid", "STRING", f"{job_num}%")]
+        )
+        ref_df = client.query(ref_q, job_config=job_config).to_dataframe()
+        if not ref_df.empty:
+            ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+            fig.add_trace(go.Scatter(x=ref_df['timestamp'], y=ref_df['Temp'], name="Theoretical Goal", line=dict(color='gray', dash='dash')))
 
-            # --- TRACE CONFIGURATION (LINES ONLY) ---
-            fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], 
-                y=s_df['temperature'], 
-                name=f"{d_lbl} ({sn})", 
-                legendgroup=d_lbl,
-                showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines',  # Removed '+markers' to hide points
-                connectgaps=False, 
-                line=dict(color=color, width=2.0), # Width 2.0 for better visibility without points
-                hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
-            ))
+    # Sensor Trace with Gap Detection
+    for sn in sorted(pdf['NodeNum'].unique()):
+        s_df = pdf[pdf['NodeNum'] == sn].sort_values('timestamp')
+        # Gap detection logic from v1.0
+        s_df['gap'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
+        gaps = s_df[s_df['gap'] > 6.0].copy()
+        if not gaps.empty:
+            gaps['temperature'] = None
+            gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
+            s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
 
-    # Freezing reference line
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
+        fig.add_trace(go.Scattergl(x=s_df['timestamp'], y=s_df['temperature'], name=f"Node {sn}", mode='lines'))
 
-    # --- GRID HIERARCHY ---
+    # Standardization
     fig.update_layout(
-        title=f"<b>{title}</b>", 
-        hovermode="x unified", 
-        plot_bgcolor='white',
-        xaxis=dict(
-            range=[start_view, end_view], 
-            showline=True, 
-            mirror=True, 
-            linecolor='black',
-            showgrid=True, 
-            dtick="D1", 
-            gridcolor='DarkGray', 
-            gridwidth=1, 
-            minor=dict(
-                dtick=6*60*60*1000, # 6-hour minor ticks
-                showgrid=True, 
-                gridcolor='Gainsboro', 
-                griddash='dash'
-            ),
-            tickformat='%b %d\n%H:%M'
-        ),
-        yaxis=dict(
-            title="Temperature (°F)", 
-            range=[-20, 80], 
-            showline=True, 
-            mirror=True, 
-            linecolor='black',
-            dtick=10, 
-            gridcolor='DarkGray',
-            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
-        ),
-        height=600, 
-        margin=dict(r=150, t=50, b=50),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
+        title=f"<b>{title}</b>", plot_bgcolor='white', hovermode="x unified",
+        xaxis=dict(range=[start_view, end_view], showline=True, linecolor='black', mirror=True),
+        yaxis=dict(title=unit_label, gridcolor='Gainsboro', range=[-20, 80] if unit_mode=="Fahrenheit" else [-30, 30]),
+        height=600
     )
-
-    # Vertical lines for Mondays
-    mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
-                             end=end_view.tz_convert(display_tz).ceil('D'), 
-                             freq='W-MON', tz=display_tz)
-    for mon in mondays:
-        fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
-
+    # 32 Degree line
+    fig.add_hline(y=(32 if unit_mode=="Fahrenheit" else 0), line_dash="dash", line_color="RoyalBlue")
     return fig
+
+####################
+#  CLIENT PORTAL   #
+####################
+
+def render_client_portal():
+    project_id = st.session_state.get('selected_project')
+    meta = st.session_state.get('project_metadata')
+
+    if not project_id:
+        st.info("💡 Enter a Job Number in the sidebar to load the portal.")
+        return
+
+    job_num = project_id.split('-')[0]
+    st.header(f"📊 Portal: {meta.get('ProjectName', project_id)}")
     
-def display_pdf(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
-###########################
-# 4. MAIN UI LAYOUT       #
-###########################
+    f_date = meta.get('Date_Freezedown')
+    if f_date: st.caption(f"❄️ Freezedown Start: {f_date}")
 
-st.title(f"📊 {PROJECT_NAME}")
-st.caption(f"Project {TARGET_PROJECT} Status")
-st.caption(f"Location: {PROJECT_LOCATION} | Timezone: {DISPLAY_TZ}")
-st.markdown(f"**{UPLOAD_NOTE}**")
+    with st.spinner("Fetching approved records..."):
+        p_df = get_universal_portal_data(project_id, view_mode="client")
 
-# Get data using centralized variables
-data = get_universal_portal_data(TARGET_PROJECT, PROJECT_START_DATE)
+    if p_df.empty:
+        st.warning("No approved data records found for this project.")
+        return
 
-if not data.empty:
-    # 1. Update the tabs list to include "As-Built Plan"
-    tab_time, tab_depth, tab_table, tab_map = st.tabs([
-        "📈 Timeline Analysis", 
-        "📏 Depth Profile", 
-        "📋 Summary Table", 
-        "🗺️ As-Built Plan"
-    ])
+    tab_time, tab_depth = st.tabs(["📈 Timeline", "📏 Depth"])
 
-    # --- TAB 1: TIMELINE ---
     with tab_time:
-        project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
-        weeks_view = st.slider("Weeks to View", 1, 12, 4, key="weeks_slider")
-        end_view = pd.Timestamp.now(tz='UTC')
-        # Ensure we don't try to view before the project actually started
-        start_view = max(project_start_ts, end_view - timedelta(weeks=weeks_view))
+        weeks = st.slider("View Window (Weeks)", 1, 12, 4)
+        end_view = pd.Timestamp.now(tz=display_tz)
+        start_view = end_view - timedelta(weeks=weeks)
         
-        for loc in sorted(data['Location'].unique()):
-            with st.expander(f"📍 {loc}", expanded=True):
-                fig = build_high_speed_graph(data[data['Location'] == loc], f"{loc} Timeline", start_view, end_view, DISPLAY_TZ)
-                st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
+        for loc in sorted(p_df['Location'].unique()):
+            with st.expander(f"📍 Location: {loc}", expanded=True):
+                loc_data = p_df[p_df['Location'] == loc]
+                fig = build_robust_graph(loc_data, f"{loc} History", start_view, end_view, unit_mode, unit_label, display_tz, f_date, job_num)
+                st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 2: DEPTH PROFILE ---
     with tab_depth:
-        # Convert Depth to numbers for vertical plotting
-        data['Depth_Num'] = pd.to_numeric(data['Depth'], errors='coerce')
-        depth_only = data.dropna(subset=['Depth_Num']).copy()
-        
-        for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} Vertical Profile"):
-                loc_data = depth_only[depth_only['Location'] == loc].copy()
-                fig_d = go.Figure()
-                
-                # Plot "Snapshots" for every Monday since the project started
-                project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
-                mondays = pd.date_range(start=project_start_ts, end=pd.Timestamp.now(tz='UTC'), freq='W-MON')
-                
-                for m_date in mondays:
-                    target_ts = m_date.replace(hour=6, minute=0, second=0)
-                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                    
-                    if not window.empty:
-                        # Get the closest reading for each sensor in that window
-                        snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                        
-                        fig_d.add_trace(go.Scatter(
-                            x=snap_df['temperature'], 
-                            y=snap_df['Depth_Num'], 
-                            mode='lines+markers', 
-                            name=target_ts.strftime('%m/%d/%y'),
-                            customdata=snap_df[['timestamp', 'NodeNum']],
-                            hovertemplate=f"<b>%{{customdata[0]|%b %d, %H:00}}</b><br>Sensor: %{{customdata[1]}}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{UNIT_LABEL}<extra></extra>"
-                        ))
-                
-                # Freezing Reference line for Depth Profile
-                fig_d.add_vline(x=32, line_dash="dash", line_color="RoyalBlue")
-                
-                fig_d.update_layout(
-                    plot_bgcolor='white', 
-                    height=600, 
-                    yaxis=dict(range=[int(((loc_data['Depth_Num'].max()//10)+1)*10), 0], title="Depth (ft)"), 
-                    xaxis=dict(range=[-20, 80], title=f"Temperature ({UNIT_LABEL})"), 
-                    hovermode="closest"
-                )
-                st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
+        st.write("Vertical depth analysis would follow similar v1.0 logic here.")
 
-    # --- TAB 3: SUMMARY TABLE ---
-    with tab_table:
-        # Get the very latest reading for every sensor
-        latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
-        # Format columns for display
-        latest['Depth_Sort'] = pd.to_numeric(latest['Depth'], errors='coerce').fillna(0)
-        latest['Last Reading'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%b %d, %H:%M')
-        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
-        
-        # Filter and sort the table
-        display_df = latest.sort_values(['Location', 'Bank', 'Depth_Sort'])[['Location', 'Bank', 'Depth', 'NodeNum', 'Current Temp', 'Last Reading']]
-        
-        st.dataframe(display_df, width='stretch', hide_index=True)
-        
-    # --- TAB 4: AS-BUILT PLAN ---
-    with tab_map:
-        if AS_BUILT_FILE:
-            st.subheader(f"Site Plan: {PROJECT_NAME}")
-            
-            if os.path.exists(AS_BUILT_FILE):
-                # Check file extension to handle JPG and PDF differently
-                file_ext = os.path.splitext(AS_BUILT_FILE)[1].lower()
-    
-                if file_ext in [".jpg", ".jpeg", ".png"]:
-                    st.image(AS_BUILT_FILE, use_container_width=True)
-                
-                elif file_ext == ".pdf":
-                    # Use the Base64 method for PDFs if preferred
-                    with open(AS_BUILT_FILE, "rb") as f:
-                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
-                    st.components.v1.html(pdf_display, height=1000)
-    
-                # Universal Download Button
-                with open(AS_BUILT_FILE, "rb") as file:
-                    st.download_button(
-                        label=f"📥 Download {os.path.basename(AS_BUILT_FILE)}",
-                        data=file,
-                        file_name=AS_BUILT_FILE,
-                        mime="application/octet-stream"
-                    )
-            else:
-                st.error(f"File '{AS_BUILT_FILE}' defined in registry but not found in repository.")
-        else:
-            st.info("No As-Built plan has been configured for this project.")
-            
+# MAIN ROUTER
+if page == "Client Portal":
+    render_client_portal()
 else:
-    st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
+    st.title(page)
+    st.write(f"The {page} module is loading for {st.session_state.get('selected_project', 'No Project Selected')}")
 
-
-
-   
