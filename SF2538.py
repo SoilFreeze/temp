@@ -377,7 +377,7 @@ def render_client_portal():
                     loc_data, f"{loc} History", start_view, now_local_ts, 
                     "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
                 ), use_container_width=True)
-          pass
+        pass
         
     
     # --- TAB 2: TEMP vs DEPTH PROFILE ---
