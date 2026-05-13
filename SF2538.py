@@ -285,7 +285,13 @@ def render_client_portal():
 
     # 3. DATA FETCHING
     with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        all_phases = []
+        for p_id in proj_registry['Project']:
+            data = get_universal_portal_data(p_id) # Inherits client-mode filtering
+            if not data.empty:
+                all_phases.append(data)
+        
+        # Define the dataframe variable clearly to avoid NameErrors
         full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
@@ -308,6 +314,26 @@ def render_client_portal():
 
     # 5. TAB ROUTING
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
+    
+    with tabs[0]:
+        # Variable name fixed from p_df to full_p_df
+        render_summary_tab(full_p_df, "°F", local_tz)
+
+    with tabs[1]:
+        # Timeline Analysis Logic
+        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
+        now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+        start_view = now_local_ts - timedelta(weeks=weeks_view)
+        
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
+        for loc in locations:
+            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
+                loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                # curve_id uses Job# and Location to find soil curves
+                st.plotly_chart(build_high_speed_graph(
+                    loc_data, f"{loc} History", start_view, now_local_ts, 
+                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
+                ), use_container_width=True)
       
     # --- TAB 0: SUMMARY ---
     with tabs[0]:
@@ -439,13 +465,13 @@ def render_client_portal():
                     )
                     st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
     
-    # --- TAB 3: SUMMARY TABLE ---
-    with tabs[3]:
-        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+   with tabs[3]:
+        # Verified Data Summary Table
+        latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
-
+       
     # --- TAB 4: AS BUILT PLAN ---
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
