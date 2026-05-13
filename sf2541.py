@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
+import os  # Added to check for file existence
 
 # ===============================================================
 # 1. TARGET CONFIGURATION (CHANGE ONLY THIS LINE)
@@ -48,9 +49,16 @@ def get_universal_portal_data(project_id):
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
 
-def render_summary_tab(full_p_df, unit_label):
+def render_summary_tab(full_p_df, unit_label, local_tz):
     st.subheader("🌐 24 hour Thermal Summary")
-    now_utc = pd.Timestamp.now(tz='UTC')
+    # Convert "now" to the project's local timezone
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+    
+    # Ensure dataframe timestamps are converted to local project time
+    if full_p_df['timestamp'].dt.tz is None:
+        full_p_df['timestamp'] = full_p_df['timestamp'].dt.tz_localize('UTC')
+    df_local = full_p_df.copy()
+    df_local['timestamp'] = df_local['timestamp'].dt.tz_convert(local_tz)
     
     def classify_pipe(row):
         loc, bank = str(row['Location']).upper(), str(row['Bank']).upper()
@@ -58,22 +66,21 @@ def render_summary_tab(full_p_df, unit_label):
         if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
         return 'Temp Pipes (TP)'
 
-    full_p_df['PipeType'] = full_p_df.apply(classify_pipe, axis=1)
+    df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     cols = st.columns(3)
     categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
 
     for i, p_type in enumerate(categories):
         with cols[i]:
             st.markdown(f"### {p_type}")
-            type_df = full_p_df[full_p_df['PipeType'] == p_type]
+            type_df = df_local[df_local['PipeType'] == p_type]
             if type_df.empty:
                 st.caption("No data available.")
                 continue
 
-            df_24h = type_df[type_df['timestamp'] >= (now_utc - pd.Timedelta(days=1))]
+            df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
             latest_ts = type_df['timestamp'].max()
-            ts_check = latest_ts if latest_ts.tzinfo else latest_ts.tz_localize('UTC')
-            lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+            lag_hrs = (now_local - latest_ts).total_seconds() / 3600
             
             target_df = df_24h if not df_24h.empty else type_df
             avg_val, high_val, low_val = target_df['temperature'].mean(), target_df['temperature'].max(), target_df['temperature'].min()
@@ -103,6 +110,8 @@ def render_client_portal():
     primary_meta = proj_registry.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     asbuilt_filename = primary_meta.get('AsBuiltFile')
+    # Get Timezone from registry; default to US/Pacific if missing
+    local_tz = primary_meta.get('Timezone', 'US/Pacific')
 
     with st.spinner("Synchronizing official records..."):
         all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
@@ -112,33 +121,44 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # Client Approval Update
+    # Client Approval Update: Localized to Project Time
     last_approved = full_p_df['timestamp'].max()
-    st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved.strftime('%B %d, %Y at %I:%M %p')}**.")
+    if last_approved.tzinfo is None:
+        last_approved = last_approved.tz_localize('UTC')
+    last_approved_local = last_approved.tz_convert(local_tz)
+    
+    st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
     st.header(f"📊 {display_name}")
     tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Sensor Status", "🗺️ As Built"])
     
     with tabs[0]:
-        render_summary_tab(full_p_df, "°F")
+        render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
         st.write("### Timeline Analysis")
-        # Existing Time vs Temp logic goes here
+        # Time vs Temp logic goes here
 
     with tabs[2]:
         st.write("### Depth Profile")
-        # Existing Depth Profile logic goes here
+        # Depth Profile logic goes here
 
     with tabs[3]:
         st.subheader("📋 Verified Data Summary")
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        # Localize table timestamps for the client
+        latest['timestamp'] = latest['timestamp'].dt.tz_localize('UTC').dt.tz_convert(local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
 
     with tabs[4]:
+        # Robust Image Handling: Checks if file exists to prevent MediaFileStorageError
         if pd.notnull(asbuilt_filename):
-            st.image(f"assets/asbuilts/{asbuilt_filename}", caption=f"As Built: {display_name}")
+            img_path = f"assets/asbuilts/{asbuilt_filename}"
+            if os.path.exists(img_path):
+                st.image(img_path, caption=f"As Built: {display_name}")
+            else:
+                st.warning(f"⚠️ As-built file '{asbuilt_filename}' not found in the assets folder.")
         else:
             st.info("The as-built site plan is currently being processed.")
 
