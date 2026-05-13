@@ -132,33 +132,49 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         except Exception as e:
             pass # Fails gracefully if reference table is missing
             
-    # 4. SENSOR DATA (Ordered by Depth)
+    # 4. SENSOR DATA (Custom Sort: R's first, S's second, then TP by Depth)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    # Sort the dataframe by Depth so the legend follows the physical ground order
-    # Sensors with no depth (like S/R pipes) will appear at the top or bottom depending on your preference.
-    plot_df['Depth_Sort'] = pd.to_numeric(plot_df['Depth'], errors='coerce').fillna(-99)
-    sorted_nodes = plot_df.sort_values('Depth_Sort')['NodeNum'].unique()
+    def get_legend_sort_key(node_id, df):
+        """Assigns a numeric priority for legend ordering."""
+        row = df[df['NodeNum'] == node_id].iloc[0]
+        bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
+        depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
+        
+        # Priority 1: Return Pipes (R)
+        if 'R' in bank:
+            return (0, bank, node_id) 
+        # Priority 2: Supply Pipes (S)
+        if 'S' in bank:
+            return (1, bank, node_id)
+        # Priority 3: Temp Pipes (by Depth)
+        return (2, depth, node_id)
+
+    # Generate the sorted list of nodes based on the custom key
+    unique_nodes = plot_df['NodeNum'].unique()
+    sorted_nodes = sorted(unique_nodes, key=lambda x: get_legend_sort_key(x, plot_df))
 
     for i, sn in enumerate(sorted_nodes):
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Legend Priority: Bank ID > Depth > Location
+        # Legend Display Formatting
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val) and depth_val != -99: 
+        elif pd.notnull(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
         else: 
             display_name = f"{loc_val} ({sn})"
         
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'],
+            x=s_df['timestamp'], 
+            y=s_df['temperature'],
             name=display_name, 
             mode='lines',
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
+        
     # 5. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
