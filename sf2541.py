@@ -332,7 +332,6 @@ def render_client_portal():
         if depth_only.empty:
             st.info("Vertical profile data is not available for this project.")
         else:
-            # Sort locations alphabetically for consistent navigation
             for loc in sorted(depth_only['Location'].unique()):
                 with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
@@ -343,12 +342,10 @@ def render_client_portal():
                     
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
-                        # 12-hour window to find the closest data packet to 6 AM
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                         
                         if not window.empty:
-                            # De-duplicate to ensure one point per sensor per depth
                             snap_df = (
                                 window.assign(diff=(window['timestamp'] - target_ts).abs())
                                 .sort_values(['NodeNum', 'diff'])
@@ -365,49 +362,46 @@ def render_client_portal():
                                 hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
                             ))
 
-                    # 1. ADD MEDIUM BLUE DASHED FREEZING REFERENCE LINE
+                    # 1. MEDIUM BLUE DASHED FREEZING REFERENCE LINE
                     fig_d.add_vline(
                         x=32, 
                         line_width=2.5, 
-                        line_dash="dash", # Changed from solid to dashed
+                        line_dash="dash", 
                         line_color="MediumBlue", 
                         annotation_text="32°F FREEZE",
                         annotation_position="top left",
                         layer="above"
                     )
-
-                    # 2. CALCULATE DYNAMIC Y-AXIS (Surface at 0, Max Depth at bottom)
-                    max_d = depth_only['Depth_Num'].max()
-                    y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
                     
-                    # 3. APPLY ENGINEERING LAYOUT WITH FULL FRAME
+                    # 2. APPLY ENGINEERING LAYOUT WITH FIXED 60FT SCALE AND FULL FRAME
                     fig_d.update_layout(
                         plot_bgcolor='white', 
-                        height=800,
+                        height=750, # Slightly smaller height for better screen fit
+                        margin=dict(r=40, l=40, t=40, b=40), # Added margin cushion to prevent frame cutoff
                         xaxis=dict(
                             title="Temperature (°F)", 
-                            range=[-20, 80], # Standardized SoilFreeze Scale
+                            range=[-20, 80], 
                             showgrid=True, 
                             gridcolor='Gainsboro', 
                             showline=True, 
-                            mirror=True, # BOX FRAME: Ensures right side border
+                            mirror=True, # Box frame (Right side)
                             linewidth=2, 
                             linecolor='black'
                         ),
                         yaxis=dict(
                             title="Depth (ft)", 
-                            range=[y_limit, 0], # Surface (0) at the top
+                            range=[60, 0], # Fixed scale at 60ft (Surface at 0)
                             dtick=10,
                             showgrid=True, 
                             gridcolor='Silver', 
                             showline=True, 
-                            mirror=True, # BOX FRAME: Ensures top border
+                            mirror=True, # Box frame (Top side)
                             linewidth=2, 
                             linecolor='black'
                         ),
                         legend=dict(
                             orientation="h", 
-                            y=-0.15, 
+                            y=-0.1, 
                             xanchor="center", 
                             x=0.5
                         )
