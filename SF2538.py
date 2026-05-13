@@ -310,18 +310,6 @@ def render_client_portal():
     with head_c2:
         if f_start_date:
             st.write(f"**Start Date:** {f_start_date.strftime('%B %d, %Y')}")
-
-    # 3. RENDER HEADER
-    st.header(f"📊 {primary_meta.get('ProjectName', TARGET_JOB_NUMBER)}")
-    
-    # Create two columns for the status metrics
-    head_c1, head_c2 = st.columns(2)
-    with head_c1:
-        if day_count_text:
-            st.subheader(day_count_text)
-    with head_c2:
-        if f_start_date:
-            st.write(f"**Start Date:** {f_start_date.strftime('%B %d, %Y')}")
             
     last_approved_local = ensure_tz_convert(p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
