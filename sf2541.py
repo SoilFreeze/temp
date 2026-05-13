@@ -375,14 +375,39 @@ def render_client_portal():
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
 
-    # --- TAB 4: AS BUILT ---
+    # --- TAB 4: AS BUILT PLAN ---
     with tabs[4]:
-        if pd.notnull(asbuilt_filename):
-            img_path = f"assets/asbuilts/{asbuilt_filename}"
-            if os.path.exists(img_path):
-                st.image(img_path)
-            else:
-                st.warning(f"File '{asbuilt_filename}' not found.")
+        asbuilt_filename = primary_meta.get('AsBuiltFile')
+        
+        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
+            # Define potential paths where the image might be located
+            # 1. assets/asbuilts/ (Standard structure)
+            # 2. Root directory (Same folder as this script)
+            # 3. assets/ (General asset folder)
+            possible_paths = [
+                os.path.join("assets", "asbuilts", asbuilt_filename),
+                asbuilt_filename,
+                os.path.join("assets", hospitals_filename if 'hospitals_filename' in locals() else asbuilt_filename) 
+            ]
+            
+            img_found = False
+            for path in possible_paths:
+                if os.path.exists(path):
+                    # Use use_container_width to ensure it fits the screen
+                    st.image(path, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
+                    img_found = True
+                    break
+            
+            if not img_found:
+                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
+                st.info(f"**Action Required:** Ensure the file is uploaded to your GitHub repository in the same folder as this script.")
+                
+                # Debug helper for the admin (shows where the app is looking)
+                with st.expander("Diagnostic Info"):
+                    st.write(f"Current Directory: `{os.getcwd()}`")
+                    st.write(f"Files in root: `{os.listdir('.')}`")
+        else:
+            st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
 
 # --- EXECUTION ---
 render_client_portal()
