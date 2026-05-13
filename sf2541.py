@@ -58,33 +58,124 @@ def get_universal_portal_data(project_id):
 
 # --- REUSED GRAPHING ENGINE ---
 
-def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, display_tz, f_start_date=None, curve_id=None, active_refs=()):
+def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
+    """
+    Engineering-grade Trend Graph.
+    - Legend (Goals): Soil Type only.
+    - Legend (Sensors): Prioritizes specific Bank IDs (S1, R3) over Bank letters.
+    - Title: Project - Thermal Trend - Location.
+    - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
+    """
+    import plotly.graph_objects as go
+    import re
     if df.empty: return go.Figure().update_layout(title="No data available")
-    pdf = df.copy()
+
+    client = get_bq_client()
+    plot_df = df.copy() 
     fig = go.Figure()
 
-    # Timezone Sync
-    pdf['timestamp'] = ensure_tz_convert(pdf['timestamp'], display_tz)
+    # 1. TIMEZONE & UNITS
+    if plot_df['timestamp'].dt.tz is None:
+        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
+    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
     
-    # Reference Curve Logic (Goal Overlay)
-    if curve_id and f_start_date:
-        client = get_bq_client()
-        today_day = (pd.Timestamp.now().date() - f_start_date).days
-        ref_q = f"SELECT Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) = UPPER('{curve_id}') ORDER BY Day"
-        ref_df = client.query(ref_q).to_dataframe()
-        if not ref_df.empty:
-            ref_df['timestamp'] = ref_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-            ref_df['timestamp'] = ensure_tz_convert(ref_df['timestamp'], display_tz)
-            y_ref = ref_df['Temp'] if unit_mode == "Fahrenheit" else (ref_df['Temp'] - 32) * 5/9
-            fig.add_trace(go.Scatter(x=ref_df['timestamp'], y=y_ref, name="Target Goal", line=dict(color='gray', dash='dash')))
+    freeze_pt = 0 if unit_mode == "Celsius" else 32
+    y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # Sensor Trace
-    for sn in sorted(pdf['NodeNum'].unique()):
-        s_df = pdf[pdf['NodeNum'] == sn].sort_values('timestamp')
-        fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=f"Node {sn}", mode='lines'))
+    # 2. GLOBAL TIMELINE SYNC
+    final_end_view, final_start_view = end_view, start_view
+    proj_str = str(st.session_state.get('selected_project', ''))
+    proj_match = re.findall(r'\d+', proj_str)
+    proj_num = proj_match[0] if proj_match else ""
+    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    fig.update_layout(title=title, template="plotly_white", xaxis_range=[start_view, end_view], yaxis_title=unit_label)
-    fig.add_hline(y=(32 if unit_mode == "Fahrenheit" else 0), line_dash="dash", line_color="RoyalBlue")
+    if f_start_date:
+        try:
+            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
+            ref_meta = client.query(ref_q).to_dataframe()
+            if not ref_meta.empty:
+                max_days = int(ref_meta['Day'].max())
+                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
+                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+        except: pass
+
+    # 3. THEORETICAL REFERENCE CURVES (Legend: Soil Type only)
+    if curve_id and curve_id != "None" and f_start_date:
+        try:
+            target_q = f"""
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
+                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
+                ORDER BY Day
+            """
+            target_df = client.query(target_q).to_dataframe()
+            if not target_df.empty:
+                for cid, c_df in target_df.groupby('CurveID'):
+                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    soil_label = str(cid).split('-')[-1].strip()
+                    fig.add_trace(go.Scatter(
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>{soil_label}</b>", mode='lines',
+                        line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
+                        legendrank=1 
+                    ))
+        except: pass
+
+    # 4. SENSOR DATA (Cleaned Legend Logic)
+    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
+    unique_nodes = sorted(plot_df['NodeNum'].unique())
+    for i, sn in enumerate(unique_nodes):
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
+        
+        # Priority Legend Logic:
+        # 1. If it's a Brine pipe and has a specific ID (S1, R3), use that.
+        # 2. If it has a depth, use depth.
+        # 3. Fallback to location name.
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            display_name = f"{bank_val} ({sn})"
+        elif pd.notnull(depth_val): 
+            display_name = f"{depth_val}ft ({sn})"
+        elif pd.notnull(bank_val): 
+            display_name = f"{bank_val} {loc_val} ({sn})"
+        else: 
+            display_name = f"{loc_val} ({sn})"
+        
+        fig.add_trace(go.Scatter(
+            x=s_df['timestamp'], y=s_df['temperature'],
+            name=display_name, mode='lines',
+            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
+            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+        ))
+
+    # 5. REFERENCE LINES
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+
+    # 6. LAYOUT & TITLING
+    p_name = st.session_state.get('selected_project')
+    fig.update_layout(
+        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        plot_bgcolor='white', hovermode="x unified", height=650,
+        xaxis=dict(
+            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
+            tickformat='%b %d'
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
+        ),
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
+    )
     return fig
 
 # --- UI TABS ---
