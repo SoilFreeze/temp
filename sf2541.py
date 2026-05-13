@@ -90,51 +90,75 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 3. THEORETICAL REFERENCE CURVES
+    # 3. THEORETICAL REFERENCE CURVES (Thick & Distinct Dashed Lines)
     if curve_id and f_start_date:
         try:
+            # List of distinct dash patterns for multiple soil types
+            dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
+            
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{proj_num}%') 
+                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
                 AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
+            
             if not target_df.empty:
-                for cid, c_df in target_df.groupby('CurveID'):
+                # Grouping ensures each soil type (e.g., 'Sand' vs 'Clay') gets its own line
+                for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    
+                    # Extract the label from the end of the ID (e.g., "2527-TP1-Silty Sand")
                     soil_label = str(cid).split('-')[-1].strip()
+                    
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>{soil_label}</b>", mode='lines',
-                        line=dict(color='rgba(40, 40, 40, 0.6)', width=4, dash='dashdot', shape='spline', smoothing=1.3),
+                        x=c_df['timestamp'], 
+                        y=ref_y, 
+                        name=f"<b>Goal: {soil_label}</b>", 
+                        mode='lines',
+                        # Thicker width (4) and unique dash style for each curve
+                        line=dict(
+                            color='rgba(80, 80, 80, 0.9)', 
+                            width=4, 
+                            dash=dash_styles[idx % len(dash_styles)], 
+                            shape='spline', 
+                            smoothing=1.3
+                        ),
                         legendrank=1 
                     ))
-        except: pass
-
-    # 4. SENSOR DATA (Cleaned Legend Logic)
+        except Exception as e:
+            pass # Fails gracefully if reference table is missing
+            
+    # 4. SENSOR DATA (Ordered by Depth)
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-    unique_nodes = sorted(plot_df['NodeNum'].unique())
-    for i, sn in enumerate(unique_nodes):
+    
+    # Sort the dataframe by Depth so the legend follows the physical ground order
+    # Sensors with no depth (like S/R pipes) will appear at the top or bottom depending on your preference.
+    plot_df['Depth_Sort'] = pd.to_numeric(plot_df['Depth'], errors='coerce').fillna(-99)
+    sorted_nodes = plot_df.sort_values('Depth_Sort')['NodeNum'].unique()
+
+    for i, sn in enumerate(sorted_nodes):
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Priority Legend Logic
+        # Legend Priority: Bank ID > Depth > Location
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val): 
+        elif pd.notnull(depth_val) and depth_val != -99: 
             display_name = f"{depth_val}ft ({sn})"
         else: 
             display_name = f"{loc_val} ({sn})"
         
         fig.add_trace(go.Scatter(
             x=s_df['timestamp'], y=s_df['temperature'],
-            name=display_name, mode='lines',
+            name=display_name, 
+            mode='lines',
             line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
             hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
         ))
-
     # 5. REFERENCE LINES
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
@@ -167,7 +191,13 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
+    """
+    Renders the 24 hour Thermal Summary split by Pipe Type.
+    Metrics show 24h Average, High, and Low without staleness alerts.
+    """
     st.subheader("🌐 24 hour Thermal Summary")
+    
+    # Standardize time to Project Local
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -179,6 +209,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         return 'Temp Pipes (TP)'
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
+    
     cols = st.columns(3)
     categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
 
@@ -186,30 +217,29 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         with cols[i]:
             st.markdown(f"### {p_type}")
             type_df = df_local[df_local['PipeType'] == p_type]
+            
             if type_df.empty:
                 st.caption("No data available.")
                 continue
 
+            # Calculate 24h window metrics
             df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-            latest_ts = type_df['timestamp'].max()
-            lag_hrs = (now_local - latest_ts).total_seconds() / 3600
             
+            # Use 24h data if available, otherwise fallback to the most recent packet
             target_df = df_24h if not df_24h.empty else type_df
-            avg_val, high_val, low_val = target_df['temperature'].mean(), target_df['temperature'].max(), target_df['temperature'].min()
-
-            label_pfx = "" if lag_hrs <= 1.5 else "Last "
-            st.metric(f"{label_pfx}24h Average", f"{avg_val:.1f}{unit_label}")
             
-            if lag_hrs > 1.5:
-                st.error(f"⚠️ Data is {int(lag_hrs)}h old")
-            else:
-                st.success("🟢 Data is Live")
+            avg_val = target_df['temperature'].mean()
+            high_val = target_df['temperature'].max()
+            low_val = target_df['temperature'].min()
 
+            # RENDER METRICS (Staleness logic removed)
+            st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
+            
             sub1, sub2 = st.columns(2)
             sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
             sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
             st.divider()
-
+            
 def render_client_portal():
     client = get_bq_client()
     if client is None: return
