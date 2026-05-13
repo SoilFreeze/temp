@@ -278,10 +278,6 @@ def render_client_portal():
         all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
         p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
-    if p_df.empty:
-        st.warning("⚠️ No approved data records available yet.")
-        return
-
     # Official Status Bar
     # 1. METADATA & LOCAL TIME SETUP
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
