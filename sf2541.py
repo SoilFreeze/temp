@@ -6,26 +6,64 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 import os
 
-# --- 1. TARGET CONFIGURATION ---
+# ===============================================================
+# 1. TARGET CONFIGURATION (CHANGE ONLY THIS LINE)
+# ===============================================================
 TARGET_JOB_NUMBER = "2527" 
-# -------------------------------
+# ===============================================================
 
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
+
+# Hide standard sidebar navigation
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
+OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+
+# --- HELPER FUNCTIONS ---
+
+@st.cache_resource
+def get_bq_client():
+    """Initializes BigQuery client with necessary scopes."""
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
+        return bigquery.Client(project=PROJECT_ID)
+    except Exception as e:
+        st.error(f"❌ BigQuery Authentication Failed: {e}")
+        return None
 
 def ensure_tz_convert(series, target_tz):
-    """Safely converts a pandas series to the target timezone regardless of current state."""
+    """Safely converts timestamps to the project's local timezone."""
     if series.dt.tz is None:
         return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
     return series.dt.tz_convert(target_tz)
 
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    """Fetches approved data records strictly for the client portal."""
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    query = f"""
+        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+        WHERE m.Project = @project_id 
+        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+        ORDER BY m.timestamp ASC
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
+
+# --- UI COMPONENTS ---
+
 def render_summary_tab(full_p_df, unit_label, local_tz):
+    """Renders the 24h Thermal Summary split by Pipe Type."""
     st.subheader("🌐 24 hour Thermal Summary")
-    
-    # Standardize time to Project Local
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -69,7 +107,11 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_client_portal():
+    """Main portal logic for Job Number aggregation and tab routing."""
     client = get_bq_client()
+    if client is None: return
+
+    # Registry Lookup: Finds all phases for the Job # (e.g., Blackjack Ph 1 & 2)
     proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -82,18 +124,14 @@ def render_client_portal():
     asbuilt_filename = primary_meta.get('AsBuiltFile')
 
     with st.spinner("Synchronizing official records..."):
-        all_phases = []
-        for p_id in proj_registry['Project']:
-            data = get_universal_portal_data(p_id)
-            if not data.empty:
-                all_phases.append(data)
+        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
         full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # Client Approval Update: Safely handle TZ conversion
+    # Data Approval Notification
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
@@ -104,15 +142,14 @@ def render_client_portal():
         render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
-        st.write("### Timeline Analysis")
+        st.write("### Timeline Analysis") # Insert time_vs_temp function here
 
     with tabs[2]:
-        st.write("### Depth Profile")
+        st.write("### Depth Profile") # Insert depth_profile function here
 
     with tabs[3]:
         st.subheader("📋 Verified Data Summary")
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        # FIXED: Use the safe conversion helper to avoid the TypeError
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
@@ -123,7 +160,7 @@ def render_client_portal():
             if os.path.exists(img_path):
                 st.image(img_path)
             else:
-                st.warning(f"As-built file '{asbuilt_filename}' missing.")
+                st.warning(f"As-built file '{asbuilt_filename}' missing from server.")
 
-# EXECUTE
+# --- EXECUTION ---
 render_client_portal()
