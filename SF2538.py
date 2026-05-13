@@ -310,9 +310,6 @@ def render_client_portal():
     with head_c2:
         if f_start_date:
             st.write(f"**Start Date:** {f_start_date.strftime('%B %d, %Y')}")
-            
-    last_approved_local = ensure_tz_convert(p_df['timestamp'], local_tz).max()
-    st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
     st.header(f"📊 {display_name}")
     tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Summary Table", "🗺️ As Built"])
