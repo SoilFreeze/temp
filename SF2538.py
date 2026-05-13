@@ -465,7 +465,7 @@ def render_client_portal():
                     )
                     st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
     
-   with tabs[3]:
+    with tabs[3]:
         # Verified Data Summary Table
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
