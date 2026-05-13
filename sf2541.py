@@ -4,61 +4,31 @@ import plotly.graph_objects as go
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
-import os  # Added to check for file existence
+import os
 
-# ===============================================================
-# 1. TARGET CONFIGURATION (CHANGE ONLY THIS LINE)
-# ===============================================================
+# --- 1. TARGET CONFIGURATION ---
 TARGET_JOB_NUMBER = "2527" 
-# ===============================================================
+# -------------------------------
 
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
-
-# Hide sidebar navigation
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
 
-@st.cache_resource
-def get_bq_client():
-    try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        return bigquery.Client(project=PROJECT_ID)
-    except Exception as e:
-        st.error(f"❌ BigQuery Authentication Failed: {e}")
-        return None
-
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
-    client = get_bq_client()
-    if client is None: return pd.DataFrame()
-    query = f"""
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
-        WHERE m.Project = @project_id 
-        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
-        ORDER BY m.timestamp ASC
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
-    return client.query(query, job_config=job_config).to_dataframe()
+def ensure_tz_convert(series, target_tz):
+    """Safely converts a pandas series to the target timezone regardless of current state."""
+    if series.dt.tz is None:
+        return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
+    return series.dt.tz_convert(target_tz)
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
     st.subheader("🌐 24 hour Thermal Summary")
-    # Convert "now" to the project's local timezone
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     
-    # Ensure dataframe timestamps are converted to local project time
-    if full_p_df['timestamp'].dt.tz is None:
-        full_p_df['timestamp'] = full_p_df['timestamp'].dt.tz_localize('UTC')
+    # Standardize time to Project Local
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_local = full_p_df.copy()
-    df_local['timestamp'] = df_local['timestamp'].dt.tz_convert(local_tz)
+    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
     def classify_pipe(row):
         loc, bank = str(row['Location']).upper(), str(row['Bank']).upper()
@@ -108,28 +78,26 @@ def render_client_portal():
         return
 
     primary_meta = proj_registry.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
-    asbuilt_filename = primary_meta.get('AsBuiltFile')
-    # Get Timezone from registry; default to US/Pacific if missing
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    asbuilt_filename = primary_meta.get('AsBuiltFile')
 
     with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        all_phases = []
+        for p_id in proj_registry['Project']:
+            data = get_universal_portal_data(p_id)
+            if not data.empty:
+                all_phases.append(data)
         full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # Client Approval Update: Localized to Project Time
-    last_approved = full_p_df['timestamp'].max()
-    if last_approved.tzinfo is None:
-        last_approved = last_approved.tz_localize('UTC')
-    last_approved_local = last_approved.tz_convert(local_tz)
-    
+    # Client Approval Update: Safely handle TZ conversion
+    last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
-    st.header(f"📊 {display_name}")
+    st.header(f"📊 {primary_meta.get('ProjectName', TARGET_JOB_NUMBER)}")
     tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Sensor Status", "🗺️ As Built"])
     
     with tabs[0]:
@@ -137,30 +105,25 @@ def render_client_portal():
 
     with tabs[1]:
         st.write("### Timeline Analysis")
-        # Time vs Temp logic goes here
 
     with tabs[2]:
         st.write("### Depth Profile")
-        # Depth Profile logic goes here
 
     with tabs[3]:
         st.subheader("📋 Verified Data Summary")
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        # Localize table timestamps for the client
-        latest['timestamp'] = latest['timestamp'].dt.tz_localize('UTC').dt.tz_convert(local_tz)
+        # FIXED: Use the safe conversion helper to avoid the TypeError
+        latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        # Robust Image Handling: Checks if file exists to prevent MediaFileStorageError
         if pd.notnull(asbuilt_filename):
             img_path = f"assets/asbuilts/{asbuilt_filename}"
             if os.path.exists(img_path):
-                st.image(img_path, caption=f"As Built: {display_name}")
+                st.image(img_path)
             else:
-                st.warning(f"⚠️ As-built file '{asbuilt_filename}' not found in the assets folder.")
-        else:
-            st.info("The as-built site plan is currently being processed.")
+                st.warning(f"As-built file '{asbuilt_filename}' missing.")
 
 # EXECUTE
 render_client_portal()
