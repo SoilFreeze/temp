@@ -319,11 +319,11 @@ def render_client_portal():
                                 hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
                             ))
 
-                    # 1. ADD MEDIUM BLUE FREEZING REFERENCE LINE
+                    # 1. ADD MEDIUM BLUE DASHED FREEZING REFERENCE LINE
                     fig_d.add_vline(
                         x=32, 
                         line_width=2.5, 
-                        line_dash="solid", 
+                        line_dash="dash", # Changed from solid to dashed
                         line_color="MediumBlue", 
                         annotation_text="32°F FREEZE",
                         annotation_position="top left",
@@ -334,7 +334,7 @@ def render_client_portal():
                     max_d = depth_only['Depth_Num'].max()
                     y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
                     
-                    # 3. APPLY ENGINEERING LAYOUT
+                    # 3. APPLY ENGINEERING LAYOUT WITH FULL FRAME
                     fig_d.update_layout(
                         plot_bgcolor='white', 
                         height=800,
@@ -344,7 +344,7 @@ def render_client_portal():
                             showgrid=True, 
                             gridcolor='Gainsboro', 
                             showline=True, 
-                            mirror=True, 
+                            mirror=True, # BOX FRAME: Ensures right side border
                             linewidth=2, 
                             linecolor='black'
                         ),
@@ -355,7 +355,7 @@ def render_client_portal():
                             showgrid=True, 
                             gridcolor='Silver', 
                             showline=True, 
-                            mirror=True, 
+                            mirror=True, # BOX FRAME: Ensures top border
                             linewidth=2, 
                             linecolor='black'
                         ),
