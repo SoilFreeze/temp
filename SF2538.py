@@ -1,54 +1,25 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import re
+import os
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
-import re
-import os
 
-#################################################################
-# 1. CONFIGURATION: Project 2538-Ferndale                       #
-#################################################################
-CURRENT_PROJECT_KEY = "2538-Ferndale" 
+# ===============================================================
+# 1. TARGET CONFIGURATION
+# ===============================================================
+TARGET_JOB_NUMBER = "2538" 
+# ===============================================================
 
-PROJECT_REGISTRY = {
-    "2527": {
-        "name": "SJI Erie St Remediation",
-        "location": "Elizabeth, NJ",
-        "start_date": "2026-04-24 00:00:00",
-        "timezone": "America/New_York",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.",
-        "as_built_file": "AsBuiltElizabeth.jpg"
-    },
-    "2538-Ferndale": {
-        "name": "Pump Station 16 Upgrade",
-        "location": "Ferndale, WA",
-        "start_date": "2026-04-22 00:00:00",
-        "timezone": "America/Los_Angeles",
-        "upload_note": "Data will be uploaded once per business day by 4pm Pacific Time.", # Added comma here
-        "as_built_file": "AsBuiltFerndale.jpg" 
-    }
-}
+st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
+st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
-# Extract variables for the active project
-active = PROJECT_REGISTRY[CURRENT_PROJECT_KEY]
-TARGET_PROJECT = CURRENT_PROJECT_KEY
-PROJECT_NAME = active["name"]
-PROJECT_LOCATION = active["location"]
-PROJECT_START_DATE = active["start_date"]
-DISPLAY_TZ = active["timezone"]
-UPLOAD_NOTE = active["upload_note"]
-UNIT_LABEL = active.get("unit", "°F")
-AS_BUILT_FILE = active.get("as_built_file", None)
-
-# Database Globals
 PROJECT_ID = "sensorpush-export"
-DATASET_ID = "Temperature"
-METADATA_TABLE = f"{PROJECT_ID}.{DATASET_ID}.metadata_snapshot" 
-OVERRIDE_TABLE = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+DATASET_ID = "Temperature" 
 
-st.set_page_config(page_title=f"Portal | {PROJECT_NAME}", layout="wide")
+# --- CORE UTILITIES ---
 
 @st.cache_resource
 def get_bq_client():
@@ -57,300 +28,437 @@ def get_bq_client():
             info = st.secrets["gcp_service_account"]
             SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
             credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=info.get("project_id", PROJECT_ID))
+            return bigquery.Client(credentials=credentials, project=info["project_id"])
         return bigquery.Client(project=PROJECT_ID)
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"❌ Authentication Failed: {e}")
         return None
 
-client = get_bq_client()
-############################
-# 2. DATA ENGINE LOGIC     #
-############################
+def ensure_tz_convert(series, target_tz):
+    if series.dt.tz is None:
+        return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
+    return series.dt.tz_convert(target_tz)
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id, start_date_str):
+def get_universal_portal_data(project_id):
+    """Fetches approved client data."""
+    client = get_bq_client()
     if client is None: return pd.DataFrame()
-
-    # Match your BigQuery path exactly
-    MASTER_VIEW = f"{PROJECT_ID}.{DATASET_ID}.master_data"
-
     query = f"""
-        SELECT 
-            NodeNum, timestamp, temperature,
-            Location, Bank, Depth, Project
-        FROM `{MASTER_VIEW}`
-        WHERE UPPER(TRIM(CAST(Project AS STRING))) = UPPER(TRIM('{project_id}'))
-        AND timestamp >= '{start_date_str}'
-        AND UPPER(TRIM(CAST(approve AS STRING))) = 'TRUE'
-        ORDER BY timestamp ASC
+        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+        WHERE m.Project = @project_id 
+        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+        ORDER BY m.timestamp ASC
     """
-    try:
-        # Run query and convert to dataframe
-        df = client.query(query).to_dataframe()
-        
-        # Check if the dataframe is empty here for debugging
-        if df.empty:
-            st.warning(f"BigQuery returned 0 rows for {project_id} after {start_date_str}. Check if 'Project' column matches exactly.")
-        
-        # Clean up strings for display
-        df['Depth'] = df['Depth'].astype(str).replace(['nan', 'None', '<NA>'], '')
-        df['Bank'] = df['Bank'].astype(str).replace(['nan', 'None', '<NA>'], '')
-        
-        return df
-    except Exception as e:
-        st.error(f"BQ View Query Error: {e}")
-        return pd.DataFrame()
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
 
-########################
-# 3. GRAPHING ENGINE   #
-########################
+# --- THE ENGINEERING GRAPHING ENGINE ---
 
-def build_high_speed_graph(df, title, start_view, end_view, display_tz):
+def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
+                           display_tz="UTC", f_start_date=None, curve_id=None):
     """
-    Generates a Plotly timeline graph with lines only and a 12-hour gap threshold.
+    Engineering-grade Trend Graph integrated for Client Portal.
+    - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
-    if df.empty: 
-        return go.Figure().update_layout(title="No data available.")
+    if df.empty: return go.Figure().update_layout(title="No data available")
 
-    pdf = df.copy()
-    # Convert timestamps to the project's local timezone
-    pdf['timestamp'] = pdf['timestamp'].dt.tz_convert(display_tz)
-    
-    # Sorting and Labeling Logic for Legend Grouping
-    def get_sort_info(r):
-        b, d = str(r['Bank']).strip(), str(r['Depth']).strip()
-        if b and b.lower() not in ['nan', 'none']: 
-            return f"Bank {b}", 0.0
-        if d and d.lower() not in ['nan', 'none']:
-            try:
-                num = float(re.findall(r"[-+]?\d*\.\d+|\d+", d)[0])
-                return f"{d}ft", num
-            except: 
-                return f"{d}ft", 999.0
-        return f"Node {r['NodeNum']}", 1000.0
-
-    pdf[['depth_label', 'sort_val']] = pdf.apply(lambda x: pd.Series(get_sort_info(x)), axis=1)
+    client = get_bq_client()
+    plot_df = df.copy() 
     fig = go.Figure()
+
+    # 1. TIMEZONE & UNITS
+    plot_df['timestamp'] = ensure_tz_convert(plot_df['timestamp'], display_tz)
     
-    unique_depths = pdf[['depth_label', 'sort_val']].drop_duplicates().sort_values('sort_val')
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    freeze_pt = 0 if unit_mode == "Celsius" else 32
+    y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    for i, (_, d_row) in enumerate(unique_depths.iterrows()):
-        d_lbl = d_row['depth_label']
-        depth_data = pdf[pdf['depth_label'] == d_lbl]
-        color = colors[i % len(colors)]
-        sensors_at_depth = depth_data['NodeNum'].unique()
-        
-        for j, sn in enumerate(sensors_at_depth):
-            s_df = depth_data[depth_data['NodeNum'] == sn].sort_values('timestamp')
+    # 2. GLOBAL TIMELINE SYNC (Reference Curve Logic)
+    final_end_view, final_start_view = end_view, start_view
+    proj_num = TARGET_JOB_NUMBER
+    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
+
+    if f_start_date:
+        try:
+            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
+            ref_meta = client.query(ref_q).to_dataframe()
+            if not ref_meta.empty:
+                max_days = int(ref_meta['Day'].max())
+                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
+                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
+        except: pass
+
+    # 3. THEORETICAL REFERENCE CURVES (Thick & Distinct Dashed Lines)
+    if curve_id and f_start_date:
+        try:
+            # List of distinct dash patterns for multiple soil types
+            dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
             
-            # --- 12h GAP DETECTION ---
-            # Calculates difference between readings; if > 12 hours, inserts a None to break the line
-            s_df['gap_hrs'] = s_df['timestamp'].diff().dt.total_seconds() / 3600
-            gap_mask = s_df['gap_hrs'] > 12.0 
-            if gap_mask.any():
-                gaps = s_df[gap_mask].copy()
-                gaps['temperature'] = None
-                gaps['timestamp'] = gaps['timestamp'] - pd.Timedelta(minutes=1)
-                s_df = pd.concat([s_df, gaps]).sort_values('timestamp')
+            target_q = f"""
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
+                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
+                ORDER BY Day
+            """
+            target_df = client.query(target_q).to_dataframe()
+            
+            if not target_df.empty:
+                # Grouping ensures each soil type (e.g., 'Sand' vs 'Clay') gets its own line
+                for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
+                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
+                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
+                    
+                    # Extract the label from the end of the ID (e.g., "2527-TP1-Silty Sand")
+                    soil_label = str(cid).split('-')[-1].strip()
+                    
+                    fig.add_trace(go.Scatter(
+                        x=c_df['timestamp'], 
+                        y=ref_y, 
+                        name=f"<b>Goal: {soil_label}</b>", 
+                        mode='lines',
+                        # Thicker width (4) and unique dash style for each curve
+                        line=dict(
+                            color='rgba(80, 80, 80, 0.9)', 
+                            width=4, 
+                            dash=dash_styles[idx % len(dash_styles)], 
+                            shape='spline', 
+                            smoothing=1.3
+                        ),
+                        legendrank=1 
+                    ))
+        except Exception as e:
+            pass # Fails gracefully if reference table is missing
+            
+    # 4. SENSOR DATA (Custom Sort: R's first, S's second, then TP by Depth)
+    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
+    
+    def get_legend_sort_key(node_id, df):
+        """Assigns a numeric priority for legend ordering."""
+        row = df[df['NodeNum'] == node_id].iloc[0]
+        bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
+        depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
+        
+        # Priority 1: Return Pipes (R)
+        if 'R' in bank:
+            return (0, bank, node_id) 
+        # Priority 2: Supply Pipes (S)
+        if 'S' in bank:
+            return (1, bank, node_id)
+        # Priority 3: Temp Pipes (by Depth)
+        return (2, depth, node_id)
 
-            # --- TRACE CONFIGURATION (LINES ONLY) ---
-            fig.add_trace(go.Scatter(
-                x=s_df['timestamp'], 
-                y=s_df['temperature'], 
-                name=f"{d_lbl} ({sn})", 
-                legendgroup=d_lbl,
-                showlegend=True if j == len(sensors_at_depth)-1 else False,
-                mode='lines',  # Removed '+markers' to hide points
-                connectgaps=False, 
-                line=dict(color=color, width=2.0), # Width 2.0 for better visibility without points
-                hovertemplate=f"<b>{d_lbl} ({sn})</b>: %{{y:.1f}}°F<extra></extra>"
-            ))
+    # Generate the sorted list of nodes based on the custom key
+    unique_nodes = plot_df['NodeNum'].unique()
+    sorted_nodes = sorted(unique_nodes, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    # Freezing reference line
-    fig.add_hline(y=32, line_dash="dash", line_color="RoyalBlue", line_width=2, annotation_text="32°F FREEZING")
+    for i, sn in enumerate(sorted_nodes):
+        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
+        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
+        
+        # Legend Display Formatting
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            display_name = f"{bank_val} ({sn})"
+        elif pd.notnull(depth_val): 
+            display_name = f"{depth_val}ft ({sn})"
+        else: 
+            display_name = f"{loc_val} ({sn})"
+        
+        fig.add_trace(go.Scatter(
+            x=s_df['timestamp'], 
+            y=s_df['temperature'],
+            name=display_name, 
+            mode='lines',
+            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
+            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+        ))
+        
+    # 5. REFERENCE LINES
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    # Bold Monday Grid
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # --- GRID HIERARCHY ---
+    # 6. LAYOUT
     fig.update_layout(
-        title=f"<b>{title}</b>", 
-        hovermode="x unified", 
-        plot_bgcolor='white',
+        title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
-            range=[start_view, end_view], 
-            showline=True, 
-            mirror=True, 
-            linecolor='black',
-            showgrid=True, 
-            dtick="D1", 
-            gridcolor='DarkGray', 
-            gridwidth=1, 
-            minor=dict(
-                dtick=6*60*60*1000, # 6-hour minor ticks
-                showgrid=True, 
-                gridcolor='Gainsboro', 
-                griddash='dash'
-            ),
-            tickformat='%b %d\n%H:%M'
+            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'),
+            tickformat='%b %d'
         ),
         yaxis=dict(
-            title="Temperature (°F)", 
-            range=[-20, 80], 
-            showline=True, 
-            mirror=True, 
-            linecolor='black',
-            dtick=10, 
-            gridcolor='DarkGray',
-            minor=dict(dtick=5, showgrid=True, gridcolor='whitesmoke')
+            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
         ),
-        height=600, 
-        margin=dict(r=150, t=50, b=50),
-        legend=dict(title="Sensors", orientation="v", x=1.02, y=1)
+        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
-
-    # Vertical lines for Mondays
-    mondays = pd.date_range(start=start_view.tz_convert(display_tz).floor('D'), 
-                             end=end_view.tz_convert(display_tz).ceil('D'), 
-                             freq='W-MON', tz=display_tz)
-    for mon in mondays:
-        fig.add_vline(x=mon, line_width=2.5, line_color="dimgray", layer="below")
-
     return fig
+
+# --- UI TABS ---
+
+def render_summary_tab(full_p_df, unit_label, local_tz):
+    """
+    Renders the 24 hour Thermal Summary split by Pipe Type.
+    Metrics show 24h Average, High, and Low without staleness alerts.
+    """
+    st.subheader("🌐 24 hour Thermal Summary")
     
-def display_pdf(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
-###########################
-# 4. MAIN UI LAYOUT       #
-###########################
+    # Standardize time to Project Local
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+    df_local = full_p_df.copy()
+    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
+    
+    def classify_pipe(row):
+        loc, bank = str(row['Location']).upper(), str(row['Bank']).upper()
+        if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
+        if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
+        return 'Temp Pipes (TP)'
 
-st.title(f"📊 {PROJECT_NAME}")
-st.caption(f"Project {TARGET_PROJECT} Status")
-st.caption(f"Location: {PROJECT_LOCATION} | Timezone: {DISPLAY_TZ}")
-st.markdown(f"**{UPLOAD_NOTE}**")
+    df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
+    
+    cols = st.columns(3)
+    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
 
-# Get data using centralized variables
-data = get_universal_portal_data(TARGET_PROJECT, PROJECT_START_DATE)
+    for i, p_type in enumerate(categories):
+        with cols[i]:
+            st.markdown(f"### {p_type}")
+            type_df = df_local[df_local['PipeType'] == p_type]
+            
+            if type_df.empty:
+                st.caption("No data available.")
+                continue
 
-if not data.empty:
-    # 1. Update the tabs list to include "As-Built Plan"
-    tab_time, tab_depth, tab_table, tab_map = st.tabs([
-        "📈 Timeline Analysis", 
-        "📏 Depth Profile", 
-        "📋 Summary Table", 
-        "🗺️ As-Built Plan"
-    ])
+            # Calculate 24h window metrics
+            df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+            
+            # Use 24h data if available, otherwise fallback to the most recent packet
+            target_df = df_24h if not df_24h.empty else type_df
+            
+            avg_val = target_df['temperature'].mean()
+            high_val = target_df['temperature'].max()
+            low_val = target_df['temperature'].min()
 
-    # --- TAB 1: TIMELINE ---
-    with tab_time:
-        project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
-        weeks_view = st.slider("Weeks to View", 1, 12, 4, key="weeks_slider")
-        end_view = pd.Timestamp.now(tz='UTC')
-        # Ensure we don't try to view before the project actually started
-        start_view = max(project_start_ts, end_view - timedelta(weeks=weeks_view))
+            # RENDER METRICS (Staleness logic removed)
+            st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
+            
+            sub1, sub2 = st.columns(2)
+            sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
+            sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
+            st.divider()
+            
+def render_client_portal():
+    client = get_bq_client()
+    if client is None: return
+
+    # Registry aggregation (Blackjack Ph 1 & 2)
+    proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
+    proj_registry = client.query(proj_q).to_dataframe()
+
+    if proj_registry.empty:
+        st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
+        return
+
+    primary_meta = proj_registry.iloc[0].to_dict()
+    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
+    local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date() if pd.notnull(primary_meta.get('Date_Freezedown')) else None
+    asbuilt_filename = primary_meta.get('AsBuiltFile')
+
+    with st.spinner("Synchronizing official records..."):
+        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
+
+    if p_df.empty:
+        st.warning("⚠️ No approved data records available yet.")
+        return
+
+    # Official Status Bar
+    last_approved_local = ensure_tz_convert(p_df['timestamp'], local_tz).max()
+    st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
+
+    st.header(f"📊 {display_name}")
+    tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Summary Table", "🗺️ As Built"])
+    
+    # --- TAB 0: SUMMARY ---
+    with tabs[0]:
+        render_summary_tab(p_df, "°F", local_tz)
+
+    # --- TAB 1: TIME vs TEMP (PASTED LOGIC) ---
+    with tabs[1]:
+        st.sidebar.subheader("📅 Timeline Controls")
+        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
+        show_ref = st.sidebar.toggle("Show Progress Goals", value=True)
         
-        for loc in sorted(data['Location'].unique()):
-            with st.expander(f"📍 {loc}", expanded=True):
-                fig = build_high_speed_graph(data[data['Location'] == loc], f"{loc} Timeline", start_view, end_view, DISPLAY_TZ)
-                st.plotly_chart(fig, width='stretch', key=f"graph_{loc}")
-
-    # --- TAB 2: DEPTH PROFILE ---
-    with tab_depth:
-        # Convert Depth to numbers for vertical plotting
-        data['Depth_Num'] = pd.to_numeric(data['Depth'], errors='coerce')
-        depth_only = data.dropna(subset=['Depth_Num']).copy()
+        now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+        start_view = now_local - timedelta(weeks=weeks_view)
         
-        for loc in sorted(depth_only['Location'].unique()):
-            with st.expander(f"📏 {loc} Vertical Profile"):
-                loc_data = depth_only[depth_only['Location'] == loc].copy()
-                fig_d = go.Figure()
-                
-                # Plot "Snapshots" for every Monday since the project started
-                project_start_ts = pd.Timestamp(PROJECT_START_DATE, tz='UTC')
-                mondays = pd.date_range(start=project_start_ts, end=pd.Timestamp.now(tz='UTC'), freq='W-MON')
-                
-                for m_date in mondays:
-                    target_ts = m_date.replace(hour=6, minute=0, second=0)
-                    window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                      (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
-                    
-                    if not window.empty:
-                        # Get the closest reading for each sensor in that window
-                        snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                        
-                        fig_d.add_trace(go.Scatter(
-                            x=snap_df['temperature'], 
-                            y=snap_df['Depth_Num'], 
-                            mode='lines+markers', 
-                            name=target_ts.strftime('%m/%d/%y'),
-                            customdata=snap_df[['timestamp', 'NodeNum']],
-                            hovertemplate=f"<b>%{{customdata[0]|%b %d, %H:00}}</b><br>Sensor: %{{customdata[1]}}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{UNIT_LABEL}<extra></extra>"
-                        ))
-                
-                # Freezing Reference line for Depth Profile
-                fig_d.add_vline(x=32, line_dash="dash", line_color="RoyalBlue")
-                
-                fig_d.update_layout(
-                    plot_bgcolor='white', 
-                    height=600, 
-                    yaxis=dict(range=[int(((loc_data['Depth_Num'].max()//10)+1)*10), 0], title="Depth (ft)"), 
-                    xaxis=dict(range=[-20, 80], title=f"Temperature ({UNIT_LABEL})"), 
-                    hovermode="closest"
+        locations = sorted([str(loc) for loc in p_df['Location'].dropna().unique()])
+        for loc in locations:
+            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
+                loc_data = p_df[p_df['Location'] == loc].copy()
+                cid = f"{TARGET_JOB_NUMBER}-{loc}" if show_ref else None
+
+                fig = build_high_speed_graph(
+                    df=loc_data, 
+                    title=f"{loc}: {weeks_view}-Week Trend", 
+                    start_view=start_view, 
+                    end_view=now_local, 
+                    unit_mode="Fahrenheit", 
+                    unit_label="°F", 
+                    display_tz=local_tz,
+                    f_start_date=f_start_date,
+                    curve_id=cid
                 )
-                st.plotly_chart(fig_d, width='stretch', key=f"depth_{loc}")
+                st.plotly_chart(fig, use_container_width=True, key=f"time_{loc}")
 
-    # --- TAB 3: SUMMARY TABLE ---
-    with tab_table:
-        # Get the very latest reading for every sensor
-        latest = data.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+    # --- TAB 2: TEMP vs DEPTH PROFILE ---
+    with tabs[2]:
+        st.subheader("📏 Vertical Temperature Profile")
         
-        # Format columns for display
-        latest['Depth_Sort'] = pd.to_numeric(latest['Depth'], errors='coerce').fillna(0)
-        latest['Last Reading'] = latest['timestamp'].dt.tz_convert(DISPLAY_TZ).dt.strftime('%b %d, %H:%M')
-        latest['Current Temp'] = latest['temperature'].apply(lambda x: f"{round(x, 1)}{UNIT_LABEL}")
+        # Ensure Depth is numeric for proper Y-axis scaling
+        p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
+        depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
-        # Filter and sort the table
-        display_df = latest.sort_values(['Location', 'Bank', 'Depth_Sort'])[['Location', 'Bank', 'Depth', 'NodeNum', 'Current Temp', 'Last Reading']]
-        
-        st.dataframe(display_df, width='stretch', hide_index=True)
-        
-    # --- TAB 4: AS-BUILT PLAN ---
-    with tab_map:
-        if AS_BUILT_FILE:
-            st.subheader(f"Site Plan: {PROJECT_NAME}")
-            
-            if os.path.exists(AS_BUILT_FILE):
-                # Check file extension to handle JPG and PDF differently
-                file_ext = os.path.splitext(AS_BUILT_FILE)[1].lower()
-    
-                if file_ext in [".jpg", ".jpeg", ".png"]:
-                    st.image(AS_BUILT_FILE, use_container_width=True)
-                
-                elif file_ext == ".pdf":
-                    # Use the Base64 method for PDFs if preferred
-                    with open(AS_BUILT_FILE, "rb") as f:
-                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
-                    st.components.v1.html(pdf_display, height=1000)
-    
-                # Universal Download Button
-                with open(AS_BUILT_FILE, "rb") as file:
-                    st.download_button(
-                        label=f"📥 Download {os.path.basename(AS_BUILT_FILE)}",
-                        data=file,
-                        file_name=AS_BUILT_FILE,
-                        mime="application/octet-stream"
-                    )
-            else:
-                st.error(f"File '{AS_BUILT_FILE}' defined in registry but not found in repository.")
+        if depth_only.empty:
+            st.info("Vertical profile data is not available for this project.")
         else:
-            st.info("No As-Built plan has been configured for this project.")
+            for loc in sorted(depth_only['Location'].unique()):
+                with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
+                    loc_data = depth_only[depth_only['Location'] == loc].copy()
+                    fig_d = go.Figure()
+                    
+                    # Generate Weekly Snapshots (Last 4 Mondays at 06:00 AM)
+                    mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+                    
+                    for m_date in mondays:
+                        target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                                         (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                        
+                        if not window.empty:
+                            snap_df = (
+                                window.assign(diff=(window['timestamp'] - target_ts).abs())
+                                .sort_values(['NodeNum', 'diff'])
+                                .drop_duplicates('NodeNum')
+                                .sort_values('Depth_Num')
+                            )
+                            
+                            fig_d.add_trace(go.Scatter(
+                                x=snap_df['temperature'], 
+                                y=snap_df['Depth_Num'], 
+                                mode='lines+markers', 
+                                name=target_ts.strftime('%m/%d/%y'),
+                                line=dict(shape='spline', smoothing=0.5),
+                                hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
+                            ))
+
+                    # 1. DYNAMIC AXIS CALCULATIONS
+                    
+                    # Y-AXIS: Next 40ft increment after deepest point
+                    max_sensor_depth = loc_data['Depth_Num'].max()
+                    y_limit = int(((max_sensor_depth // 40) + 1) * 40) if pd.notnull(max_sensor_depth) else 40
+                    
+                    # X-AXIS: Go to 60, unless data is higher, then go to 80
+                    max_temp_seen = loc_data['temperature'].max()
+                    x_limit = 80 if max_temp_seen > 60 else 60
+
+                    # 2. MEDIUM BLUE DASHED FREEZING REFERENCE LINE
+                    fig_d.add_vline(
+                        x=32, 
+                        line_width=2.5, 
+                        line_dash="dash", 
+                        line_color="MediumBlue", 
+                        annotation_text="32°F FREEZE",
+                        annotation_position="top left",
+                        layer="above"
+                    )
+                    
+                    # 3. APPLY ENGINEERING LAYOUT WITH FULL FRAME
+                    fig_d.update_layout(
+                        plot_bgcolor='white', 
+                        height=750, 
+                        margin=dict(r=50, l=50, t=50, b=50), # Large cushion for full framing
+                        xaxis=dict(
+                            title="Temperature (°F)", 
+                            range=[-20, x_limit], # Dynamic Temp Scale
+                            dtick=10,
+                            showgrid=True, 
+                            gridcolor='Gainsboro', 
+                            showline=True, 
+                            mirror=True, # Right-side frame
+                            linewidth=2, 
+                            linecolor='black'
+                        ),
+                        yaxis=dict(
+                            title="Depth (ft)", 
+                            range=[y_limit, 0], # Dynamic Depth Scale (0 at top)
+                            dtick=10,
+                            showgrid=True, 
+                            gridcolor='Silver', 
+                            showline=True, 
+                            mirror=True, # Top frame
+                            linewidth=2, 
+                            linecolor='black'
+                        ),
+                        legend=dict(
+                            orientation="h", 
+                            y=-0.15, 
+                            xanchor="center", 
+                            x=0.5
+                        )
+                    )
+                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
+    
+    # --- TAB 3: SUMMARY TABLE ---
+    with tabs[3]:
+        latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+        latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
+        latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
+        st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
+
+    # --- TAB 4: AS BUILT PLAN ---
+    with tabs[4]:
+        asbuilt_filename = primary_meta.get('AsBuiltFile')
+        
+        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
+            # Define potential paths where the image might be located
+            # 1. assets/asbuilts/ (Standard structure)
+            # 2. Root directory (Same folder as this script)
+            # 3. assets/ (General asset folder)
+            possible_paths = [
+                os.path.join("assets", "asbuilts", asbuilt_filename),
+                asbuilt_filename,
+                os.path.join("assets", hospitals_filename if 'hospitals_filename' in locals() else asbuilt_filename) 
+            ]
             
-else:
-    st.info(f"Awaiting data for {PROJECT_NAME} (Cutoff: {PROJECT_START_DATE})...")
+            img_found = False
+            for path in possible_paths:
+                if os.path.exists(path):
+                    # Use use_container_width to ensure it fits the screen
+                    st.image(path, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
+                    img_found = True
+                    break
+            
+            if not img_found:
+                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
+                st.info(f"**Action Required:** Ensure the file is uploaded to your GitHub repository in the same folder as this script.")
+                
+                # Debug helper for the admin (shows where the app is looking)
+                with st.expander("Diagnostic Info"):
+                    st.write(f"Current Directory: `{os.getcwd()}`")
+                    st.write(f"Files in root: `{os.listdir('.')}`")
+        else:
+            st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
 
-
-
-   
+# --- EXECUTION ---
+render_client_portal()
