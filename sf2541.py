@@ -51,11 +51,88 @@ def get_universal_portal_data(project_id, view_mode="client"):
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
+def render_summary_tab(full_p_df, unit_label, display_tz):
+    """
+    Renders the 24h average, high, and low split by S, R, and Temp Pipes.
+    Includes staleness tracking for inactive sensors.
+    """
+    st.subheader("🌐 Project Thermal Overview (Last 24 Hours)")
+    
+    now_utc = pd.Timestamp.now(tz='UTC')
+    
+    # 1. CLASSIFY DATA BY PIPE TYPE
+    # S = Supply, R = Return, TP = Everything else with a Depth
+    def classify_pipe(row):
+        loc = str(row['Location']).upper()
+        bank = str(row['Bank']).upper()
+        if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
+        if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
+        return 'Temp Pipes (TP)'
+
+    full_p_df['PipeType'] = full_p_df.apply(classify_pipe, axis=1)
+
+    # 2. CREATE COLUMN LAYOUT
+    cols = st.columns(3)
+    pipe_types = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
+
+    for i, p_type in enumerate(pipe_types):
+        with cols[i]:
+            st.markdown(f"### {p_type}")
+            type_df = full_p_df[full_p_df['PipeType'] == p_type]
+            
+            if type_df.empty:
+                st.caption("No data available for this category.")
+                continue
+
+            # Identify Latest Readings per Node
+            latest_readings = type_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+            
+            # Identify 24h Window for Metrics
+            df_24h = type_df[type_df['timestamp'] >= (now_utc - pd.Timedelta(days=1))]
+
+            # CALCULATE METRICS
+            if not df_24h.empty:
+                avg_val = df_24h['temperature'].mean()
+                high_val = df_24h['temperature'].max()
+                low_val = df_24h['temperature'].min()
+            else:
+                # Fallback to latest known if no 24h data
+                avg_val = latest_readings['temperature'].mean()
+                high_val = latest_readings['temperature'].max()
+                low_val = latest_readings['temperature'].min()
+
+            # RENDER MAIN METRIC
+            st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
+            
+            # RENDER HIGH/LOW
+            sub_c1, sub_c2 = st.columns(2)
+            sub_c1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
+            sub_c2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
+
+            st.divider()
+
+            # 3. STALENESS / CURRENT TEMP LOGIC
+            st.markdown("**Latest Readings**")
+            for _, row in latest_readings.iterrows():
+                # Calculate lag
+                ts_check = row['timestamp'] if row['timestamp'].tzinfo else row['timestamp'].tz_localize('UTC')
+                lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+                
+                # Format Display
+                pos = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
+                
+                if lag_hrs > 1.5:
+                    # Stale Data Tag
+                    st.write(f"⚠️ {row['Location']} ({pos}): **{row['temperature']:.1f}{unit_label}**")
+                    st.caption(f"*(Data is {int(lag_hrs)}h old)*")
+                else:
+                    # Current Data
+                    st.write(f"🟢 {row['Location']} ({pos}): **{row['temperature']:.1f}{unit_label}**")
 
 def render_client_portal():
     client = get_bq_client()
     
-    # Robust Lookup: Finds all phases/projects associated with that Job Number
+    # 1. REGISTRY LOOKUP (Find all phases)
     proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -64,33 +141,26 @@ def render_client_portal():
         return
 
     primary_meta = proj_registry.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
-    asbuilt_filename = primary_meta.get('AsBuiltFile')
+    unit_label = "°F" # Hardcoded for client portal as requested
 
-    # Aggregated Data Fetching
+    # 2. AGGREGATED DATA FETCH (Phased Blackjack Support)
     with st.spinner("Synchronizing official records..."):
-        full_p_df = pd.concat([get_universal_portal_data(p_id) for p_id in proj_registry['Project']])
+        all_data = []
+        for p_id in proj_registry['Project']:
+            phase_df = get_universal_portal_data(p_id, view_mode="client")
+            if not phase_df.empty:
+                all_data.append(phase_df)
+        
+        if not all_data:
+            st.warning("⚠️ No approved data available yet.")
+            return
+        full_p_df = pd.concat(all_data)
 
-    if full_p_df.empty:
-        st.warning("⚠️ No approved data records available yet.")
-        return
-
-    # Tabs for the Dashboard
+    # 3. TABS
     tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Sensor Status", "🗺️ As Built"])
-    tab_sum, tab_time, tab_depth, tab_status, tab_built = tabs
-
-    with tab_sum:
-        st.subheader("🌐 Global Project Health")
-        c1, c2, c3 = st.columns(3)
-        last_24h = full_p_df[full_p_df['timestamp'] >= (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=1))]
-        
-        c1.metric("Project Avg (24h)", f"{last_24h['temperature'].mean():.1f}°F")
-        c2.metric("Coldest Probe", f"{last_24h['temperature'].min():.1f}°F")
-        c3.metric("Sensors Online", full_p_df['NodeNum'].nunique())
-        
-        st.divider()
-        st.write("### Phase Comparison")
-        st.dataframe(full_p_df.groupby('Project')['temperature'].agg(['mean', 'min', 'max']), use_container_width=True)
+    
+    with tabs[0]:
+        render_summary_tab(full_p_df, unit_label, "US/Pacific") # Pass your display_tz here
 
     with tab_time:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
