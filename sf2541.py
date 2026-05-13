@@ -51,17 +51,18 @@ def get_universal_portal_data(project_id, view_mode="client"):
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
-def render_summary_tab(full_p_df, unit_label, display_tz):
+
+
+def render_summary_tab(full_p_df, unit_label):
     """
-    Renders the 24h average, high, and low split by S, R, and Temp Pipes.
-    Includes staleness tracking for inactive sensors.
+    Renders the 24 hour Thermal Summary split by S, R, and TP.
+    Shows 24h Avg, High, and Low. Displays staleness tags if data is old.
     """
-    st.subheader("🌐 Project Thermal Overview (Last 24 Hours)")
+    st.subheader("🌐 24 hour Thermal Summary")
     
     now_utc = pd.Timestamp.now(tz='UTC')
     
-    # 1. CLASSIFY DATA BY PIPE TYPE
-    # S = Supply, R = Return, TP = Everything else with a Depth
+    # 1. CLASSIFICATION LOGIC
     def classify_pipe(row):
         loc = str(row['Location']).upper()
         bank = str(row['Bank']).upper()
@@ -71,68 +72,54 @@ def render_summary_tab(full_p_df, unit_label, display_tz):
 
     full_p_df['PipeType'] = full_p_df.apply(classify_pipe, axis=1)
 
-    # 2. CREATE COLUMN LAYOUT
+    # 2. CATEGORY LAYOUT
     cols = st.columns(3)
-    pipe_types = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
+    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
 
-    for i, p_type in enumerate(pipe_types):
+    for i, p_type in enumerate(categories):
         with cols[i]:
             st.markdown(f"### {p_type}")
             type_df = full_p_df[full_p_df['PipeType'] == p_type]
             
             if type_df.empty:
-                st.caption("No data available for this category.")
+                st.caption("No data available.")
                 continue
 
-            # Identify Latest Readings per Node
-            latest_readings = type_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-            
-            # Identify 24h Window for Metrics
+            # 24h Window Calculation
             df_24h = type_df[type_df['timestamp'] >= (now_utc - pd.Timedelta(days=1))]
-
-            # CALCULATE METRICS
-            if not df_24h.empty:
-                avg_val = df_24h['temperature'].mean()
-                high_val = df_24h['temperature'].max()
-                low_val = df_24h['temperature'].min()
-            else:
-                # Fallback to latest known if no 24h data
-                avg_val = latest_readings['temperature'].mean()
-                high_val = latest_readings['temperature'].max()
-                low_val = latest_readings['temperature'].min()
-
-            # RENDER MAIN METRIC
-            st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
+            latest_ts = type_df['timestamp'].max()
             
-            # RENDER HIGH/LOW
-            sub_c1, sub_c2 = st.columns(2)
-            sub_c1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
-            sub_c2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
+            # STALENESS LOGIC
+            ts_check = latest_ts if latest_ts.tzinfo else latest_ts.tz_localize('UTC')
+            lag_hrs = (now_utc - ts_check).total_seconds() / 3600
+            
+            # Use 24h data if available, otherwise use latest known
+            target_df = df_24h if not df_24h.empty else type_df
+            avg_val = target_df['temperature'].mean()
+            high_val = target_df['temperature'].max()
+            low_val = target_df['temperature'].min()
 
+            # RENDER MAIN METRICS
+            label_prefix = "" if lag_hrs <= 1.5 else "Last "
+            st.metric(f"{label_prefix}24h Average", f"{avg_val:.1f}{unit_label}")
+            
+            # Show staleness tag directly under the main metric if old
+            if lag_hrs > 1.5:
+                st.error(f"⚠️ Data is {int(lag_hrs)}h old")
+            else:
+                st.success("🟢 Data is Live")
+
+            # HIGH / LOW BREAKDOWN
+            sub1, sub2 = st.columns(2)
+            sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
+            sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
+            
             st.divider()
-
-            # 3. STALENESS / CURRENT TEMP LOGIC
-            st.markdown("**Latest Readings**")
-            for _, row in latest_readings.iterrows():
-                # Calculate lag
-                ts_check = row['timestamp'] if row['timestamp'].tzinfo else row['timestamp'].tz_localize('UTC')
-                lag_hrs = (now_utc - ts_check).total_seconds() / 3600
-                
-                # Format Display
-                pos = f"{row['Depth']}ft" if pd.notnull(row['Depth']) else f"Bank {row['Bank']}"
-                
-                if lag_hrs > 1.5:
-                    # Stale Data Tag
-                    st.write(f"⚠️ {row['Location']} ({pos}): **{row['temperature']:.1f}{unit_label}**")
-                    st.caption(f"*(Data is {int(lag_hrs)}h old)*")
-                else:
-                    # Current Data
-                    st.write(f"🟢 {row['Location']} ({pos}): **{row['temperature']:.1f}{unit_label}**")
 
 def render_client_portal():
     client = get_bq_client()
     
-    # 1. REGISTRY LOOKUP (Find all phases)
+    # 1. REGISTRY LOOKUP (Aggregates all phases for the Job #)
     proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -141,46 +128,29 @@ def render_client_portal():
         return
 
     primary_meta = proj_registry.iloc[0].to_dict()
-    unit_label = "°F" # Hardcoded for client portal as requested
+    unit_label = "°F"
 
-    # 2. AGGREGATED DATA FETCH (Phased Blackjack Support)
-    with st.spinner("Synchronizing official records..."):
-        all_data = []
-        for p_id in proj_registry['Project']:
-            phase_df = get_universal_portal_data(p_id, view_mode="client")
-            if not phase_df.empty:
-                all_data.append(phase_df)
-        
-        if not all_data:
-            st.warning("⚠️ No approved data available yet.")
-            return
-        full_p_df = pd.concat(all_data)
+    # 2. AGGREGATED DATA FETCH (Phased Support)
+    all_data = []
+    for p_id in proj_registry['Project']:
+        phase_df = get_universal_portal_data(p_id, view_mode="client")
+        if not phase_df.empty:
+            all_data.append(phase_df)
+    
+    if not all_data:
+        st.warning("⚠️ No approved data records available.")
+        return
+    full_p_df = pd.concat(all_data)
 
     # 3. TABS
     tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Sensor Status", "🗺️ As Built"])
     
     with tabs[0]:
-        render_summary_tab(full_p_df, unit_label, "US/Pacific") # Pass your display_tz here
+        render_summary_tab(full_p_df, unit_label)
 
-    with tab_time:
-        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-        for phase in sorted(full_p_df['Project'].unique()):
-            st.markdown(f"### {phase}")
-            # Insert your build_high_speed_graph call here using phase filtered data
+    # Note: Logic for Tabs 1-4 should follow your existing render_client_portal functions.
 
-    with tab_depth:
-        st.subheader("📏 Vertical Temperature Profile")
-        # Logic for Depth Snapshot rendering
 
-    with tab_status:
-        latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        st.dataframe(latest[['Project', 'Location', 'Depth', 'Bank', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
-
-    with tab_built:
-        if pd.notnull(asbuilt_filename):
-            st.image(f"assets/asbuilts/{asbuilt_filename}", caption=f"As Built: {display_name}")
-        else:
-            st.info("The as-built site plan is currently being processed.")
 
 # EXECUTE PORTAL
 render_client_portal()
