@@ -362,7 +362,17 @@ def render_client_portal():
                                 hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
                             ))
 
-                    # 1. MEDIUM BLUE DASHED FREEZING REFERENCE LINE
+                    # 1. DYNAMIC AXIS CALCULATIONS
+                    
+                    # Y-AXIS: Next 40ft increment after deepest point
+                    max_sensor_depth = loc_data['Depth_Num'].max()
+                    y_limit = int(((max_sensor_depth // 40) + 1) * 40) if pd.notnull(max_sensor_depth) else 40
+                    
+                    # X-AXIS: Go to 60, unless data is higher, then go to 80
+                    max_temp_seen = loc_data['temperature'].max()
+                    x_limit = 80 if max_temp_seen > 60 else 60
+
+                    # 2. MEDIUM BLUE DASHED FREEZING REFERENCE LINE
                     fig_d.add_vline(
                         x=32, 
                         line_width=2.5, 
@@ -373,35 +383,36 @@ def render_client_portal():
                         layer="above"
                     )
                     
-                    # 2. APPLY ENGINEERING LAYOUT WITH FIXED 60FT SCALE AND FULL FRAME
+                    # 3. APPLY ENGINEERING LAYOUT WITH FULL FRAME
                     fig_d.update_layout(
                         plot_bgcolor='white', 
-                        height=750, # Slightly smaller height for better screen fit
-                        margin=dict(r=40, l=40, t=40, b=40), # Added margin cushion to prevent frame cutoff
+                        height=750, 
+                        margin=dict(r=50, l=50, t=50, b=50), # Large cushion for full framing
                         xaxis=dict(
                             title="Temperature (°F)", 
-                            range=[-20, 80], 
+                            range=[-20, x_limit], # Dynamic Temp Scale
+                            dtick=10,
                             showgrid=True, 
                             gridcolor='Gainsboro', 
                             showline=True, 
-                            mirror=True, # Box frame (Right side)
+                            mirror=True, # Right-side frame
                             linewidth=2, 
                             linecolor='black'
                         ),
                         yaxis=dict(
                             title="Depth (ft)", 
-                            range=[60, 0], # Fixed scale at 60ft (Surface at 0)
+                            range=[y_limit, 0], # Dynamic Depth Scale (0 at top)
                             dtick=10,
                             showgrid=True, 
                             gridcolor='Silver', 
                             showline=True, 
-                            mirror=True, # Box frame (Top side)
+                            mirror=True, # Top frame
                             linewidth=2, 
                             linecolor='black'
                         ),
                         legend=dict(
                             orientation="h", 
-                            y=-0.1, 
+                            y=-0.15, 
                             xanchor="center", 
                             x=0.5
                         )
