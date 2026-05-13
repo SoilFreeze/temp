@@ -275,41 +275,98 @@ def render_client_portal():
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"time_{loc}")
 
-    # --- TAB 2: TEMP vs DEPTH (PASTED LOGIC) ---
+    # --- TAB 2: TEMP vs DEPTH PROFILE ---
     with tabs[2]:
         st.subheader("📏 Vertical Temperature Profile")
+        
+        # Ensure Depth is numeric for proper Y-axis scaling
         p_df['Depth_Num'] = pd.to_numeric(p_df['Depth'], errors='coerce')
         depth_only = p_df.dropna(subset=['Depth_Num', 'Location']).copy()
         
         if depth_only.empty:
-            st.info("Vertical profile data is not available.")
+            st.info("Vertical profile data is not available for this project.")
         else:
+            # Sort locations alphabetically for consistent navigation
             for loc in sorted(depth_only['Location'].unique()):
                 with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
                     loc_data = depth_only[depth_only['Location'] == loc].copy()
                     fig_d = go.Figure()
                     
+                    # Generate Weekly Snapshots (Last 4 Mondays at 06:00 AM)
                     mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+                    
                     for m_date in mondays:
                         target_ts = m_date.replace(hour=6, minute=0, second=0)
+                        # 12-hour window to find the closest data packet to 6 AM
                         window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
                                          (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                        
                         if not window.empty:
-                            snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                            fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y')))
+                            # De-duplicate to ensure one point per sensor per depth
+                            snap_df = (
+                                window.assign(diff=(window['timestamp'] - target_ts).abs())
+                                .sort_values(['NodeNum', 'diff'])
+                                .drop_duplicates('NodeNum')
+                                .sort_values('Depth_Num')
+                            )
+                            
+                            fig_d.add_trace(go.Scatter(
+                                x=snap_df['temperature'], 
+                                y=snap_df['Depth_Num'], 
+                                mode='lines+markers', 
+                                name=target_ts.strftime('%m/%d/%y'),
+                                line=dict(shape='spline', smoothing=0.5),
+                                hovertemplate="Depth: %{y}ft<br>Temp: %{x:.1f}°F<extra></extra>"
+                            ))
 
+                    # 1. ADD MEDIUM BLUE FREEZING REFERENCE LINE
+                    fig_d.add_vline(
+                        x=32, 
+                        line_width=2.5, 
+                        line_dash="solid", 
+                        line_color="MediumBlue", 
+                        annotation_text="32°F FREEZE",
+                        annotation_position="top left",
+                        layer="above"
+                    )
+
+                    # 2. CALCULATE DYNAMIC Y-AXIS (Surface at 0, Max Depth at bottom)
                     max_d = depth_only['Depth_Num'].max()
                     y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
-                    fig_d.update_layout(plot_bgcolor='white', height=600, xaxis=dict(title="Temp (°F)", range=[-10, 80], showline=True, mirror=True), yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showline=True, mirror=True))
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
-                    # Cyan Freezing Line added here
-                    fig_d.add_vline(x=32, line_width=2, line_dash="solid", line_color="cyan")
-
-                    fig_d.update_layout(plot_bgcolor='white', height=800, 
-                                        xaxis=dict(title="Temp (°F)", range=[-20, 80], showline=True, mirror=True, linewidth=2, linecolor='black'), 
-                                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showline=True, mirror=True, linewidth=2, linecolor='black'))
-                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
-
+                    
+                    # 3. APPLY ENGINEERING LAYOUT
+                    fig_d.update_layout(
+                        plot_bgcolor='white', 
+                        height=800,
+                        xaxis=dict(
+                            title="Temperature (°F)", 
+                            range=[-20, 80], # Standardized SoilFreeze Scale
+                            showgrid=True, 
+                            gridcolor='Gainsboro', 
+                            showline=True, 
+                            mirror=True, 
+                            linewidth=2, 
+                            linecolor='black'
+                        ),
+                        yaxis=dict(
+                            title="Depth (ft)", 
+                            range=[y_limit, 0], # Surface (0) at the top
+                            dtick=10,
+                            showgrid=True, 
+                            gridcolor='Silver', 
+                            showline=True, 
+                            mirror=True, 
+                            linewidth=2, 
+                            linecolor='black'
+                        ),
+                        legend=dict(
+                            orientation="h", 
+                            y=-0.15, 
+                            xanchor="center", 
+                            x=0.5
+                        )
+                    )
+                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
     
     # --- TAB 3: SUMMARY TABLE ---
     with tabs[3]:
