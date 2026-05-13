@@ -257,10 +257,11 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
             
 def render_client_portal():
+    """Main portal logic for Job Number aggregation and tab routing."""
     client = get_bq_client()
     if client is None: return
 
-    # Registry aggregation (Blackjack Ph 1 & 2)
+    # 1. REGISTRY LOOKUP (Aggregates all phases for the Job #)
     proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -268,52 +269,46 @@ def render_client_portal():
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
+    # 2. METADATA & TIMEZONE SETUP
     primary_meta = proj_registry.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
-    f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date() if pd.notnull(primary_meta.get('Date_Freezedown')) else None
-    asbuilt_filename = primary_meta.get('AsBuiltFile')
-
-    with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
-        p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
-
-    # Official Status Bar
-    # 1. METADATA & LOCAL TIME SETUP
-    local_tz = primary_meta.get('Timezone', 'US/Pacific')
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     
-    # 2. CALCULATE FREEZEDOWN DURATION
+    # Calculate Freezedown Duration
     f_start_date = None
     day_count_text = ""
-    
     if pd.notnull(primary_meta.get('Date_Freezedown')):
-        # Convert registry date to a python date object
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
-        # Calculate days elapsed (current date minus start date)
         days_since = (now_local - f_start_date).days
-        
-        # Format the display text
-        if days_since >= 0:
-            day_count_text = f"🗓️ **Day {days_since}** of Freezedown"
-        else:
-            day_count_text = f"⏳ **{abs(days_since)} Days** until Freezedown Start"
+        day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
-    # 3. RENDER HEADER
-    st.header(f"📊 {primary_meta.get('ProjectName', TARGET_JOB_NUMBER)}")
+    # 3. DATA FETCHING
+    with st.spinner("Synchronizing official records..."):
+        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
+
+    if full_p_df.empty:
+        st.warning("⚠️ No approved data records available yet.")
+        return
+
+    # 4. SINGLE HEADER SECTION
+    st.title(f"📊 {display_name}")
     
-    # Create two columns for the status metrics
+    # Official Status Bar (Aligned to Project Time)
+    last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
+    st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
+
+    # Freezedown Tracking Row
     head_c1, head_c2 = st.columns(2)
     with head_c1:
-        if day_count_text:
-            st.subheader(day_count_text)
+        if day_count_text: st.subheader(day_count_text)
     with head_c2:
-        if f_start_date:
-            st.write(f"**Start Date:** {f_start_date.strftime('%B %d, %Y')}")
+        if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
 
-    st.header(f"📊 {display_name}")
-    tabs = st.tabs(["🏠 Summary", "📈 Time vs Temp", "📏 Temp vs Depth", "📋 Summary Table", "🗺️ As Built"])
-    
+    # 5. TAB ROUTING
+    tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
+      
     # --- TAB 0: SUMMARY ---
     with tabs[0]:
         render_summary_tab(p_df, "°F", local_tz)
