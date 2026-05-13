@@ -302,7 +302,15 @@ def render_client_portal():
                     y_limit = int(((max_d // 10) + 1) * 10) if pd.notnull(max_d) else 50
                     fig_d.update_layout(plot_bgcolor='white', height=600, xaxis=dict(title="Temp (°F)", range=[-10, 80], showline=True, mirror=True), yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showline=True, mirror=True))
                     st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
+                    # Cyan Freezing Line added here
+                    fig_d.add_vline(x=32, line_width=2, line_dash="solid", line_color="cyan")
 
+                    fig_d.update_layout(plot_bgcolor='white', height=800, 
+                                        xaxis=dict(title="Temp (°F)", range=[-20, 80], showline=True, mirror=True, linewidth=2, linecolor='black'), 
+                                        yaxis=dict(title="Depth (ft)", range=[y_limit, 0], showline=True, mirror=True, linewidth=2, linecolor='black'))
+                    st.plotly_chart(fig_d, use_container_width=True, key=f"depth_{loc}")
+
+    
     # --- TAB 3: SUMMARY TABLE ---
     with tabs[3]:
         latest = p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
