@@ -1,26 +1,25 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import re
+import os
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
-import os
 
 # ===============================================================
-# 1. TARGET CONFIGURATION (CHANGE ONLY THIS LINE)
+# 1. TARGET CONFIGURATION
 # ===============================================================
 TARGET_JOB_NUMBER = "2527" 
 # ===============================================================
 
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
-
-# Hide standard sidebar navigation for client view
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
-# --- CORE ENGINE FUNCTIONS ---
+# --- CORE UTILITIES ---
 
 @st.cache_resource
 def get_bq_client():
@@ -36,39 +35,18 @@ def get_bq_client():
         return None
 
 def ensure_tz_convert(series, target_tz):
-    """Safely handles conversion for both localized and naive timestamps."""
     if series.dt.tz is None:
         return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
     return series.dt.tz_convert(target_tz)
 
-@st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
-    client = get_bq_client()
-    if client is None: return pd.DataFrame()
-    query = f"""
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
-        WHERE m.Project = @project_id 
-        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
-        ORDER BY m.timestamp ASC
-    """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
-    return client.query(query, job_config=job_config).to_dataframe()
+# --- THE ENGINEERING GRAPHING ENGINE ---
 
-# --- REUSED GRAPHING ENGINE ---
-
-def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
-                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None):
+def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
+                           display_tz="UTC", f_start_date=None, curve_id=None):
     """
-    Engineering-grade Trend Graph.
-    - Legend (Goals): Soil Type only.
-    - Legend (Sensors): Prioritizes specific Bank IDs (S1, R3) over Bank letters.
-    - Title: Project - Thermal Trend - Location.
+    Engineering-grade Trend Graph integrated for Client Portal.
     - Style: RoyalBlue Dashed Freeze Line, 15-Color Palette, 10/2 Grid, Bold Mondays.
     """
-    import plotly.graph_objects as go
-    import re
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -76,18 +54,14 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig = go.Figure()
 
     # 1. TIMEZONE & UNITS
-    if plot_df['timestamp'].dt.tz is None:
-        plot_df['timestamp'] = plot_df['timestamp'].dt.tz_localize('UTC')
-    plot_df['timestamp'] = plot_df['timestamp'].dt.tz_convert(display_tz)
+    plot_df['timestamp'] = ensure_tz_convert(plot_df['timestamp'], display_tz)
     
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # 2. GLOBAL TIMELINE SYNC
+    # 2. GLOBAL TIMELINE SYNC (Reference Curve Logic)
     final_end_view, final_start_view = end_view, start_view
-    proj_str = str(st.session_state.get('selected_project', ''))
-    proj_match = re.findall(r'\d+', proj_str)
-    proj_num = proj_match[0] if proj_match else ""
+    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if f_start_date:
@@ -100,8 +74,8 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 3. THEORETICAL REFERENCE CURVES (Legend: Soil Type only)
-    if curve_id and curve_id != "None" and f_start_date:
+    # 3. THEORETICAL REFERENCE CURVES
+    if curve_id and f_start_date:
         try:
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
@@ -113,7 +87,7 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
             if not target_df.empty:
                 for cid, c_df in target_df.groupby('CurveID'):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                    c_df['timestamp'] = c_df['timestamp'].dt.tz_localize('UTC').dt.tz_convert(display_tz)
+                    c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
                     fig.add_trace(go.Scatter(
@@ -130,16 +104,11 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
         s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
         depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
         
-        # Priority Legend Logic:
-        # 1. If it's a Brine pipe and has a specific ID (S1, R3), use that.
-        # 2. If it has a depth, use depth.
-        # 3. Fallback to location name.
+        # Priority Legend Logic
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
             display_name = f"{bank_val} ({sn})"
         elif pd.notnull(depth_val): 
             display_name = f"{depth_val}ft ({sn})"
-        elif pd.notnull(bank_val): 
-            display_name = f"{bank_val} {loc_val} ({sn})"
         else: 
             display_name = f"{loc_val} ({sn})"
         
@@ -154,14 +123,15 @@ def build_high_speed_graph(df, title, start_view, end_view, active_refs, unit_mo
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
+    
+    # Bold Monday Grid
     m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
     for m_dt in m_range:
         fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
 
-    # 6. LAYOUT & TITLING
-    p_name = st.session_state.get('selected_project')
+    # 6. LAYOUT
     fig.update_layout(
-        title=dict(text=f"<b>{p_name} - Thermal Trend - {title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
         plot_bgcolor='white', hovermode="x unified", height=650,
         xaxis=dict(
             range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
