@@ -39,6 +39,22 @@ def ensure_tz_convert(series, target_tz):
         return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
     return series.dt.tz_convert(target_tz)
 
+@st.cache_data(ttl=600)
+def get_universal_portal_data(project_id):
+    """Fetches approved client data."""
+    client = get_bq_client()
+    if client is None: return pd.DataFrame()
+    query = f"""
+        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+        WHERE m.Project = @project_id 
+        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+        ORDER BY m.timestamp ASC
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
+
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
