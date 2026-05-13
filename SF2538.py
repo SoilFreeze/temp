@@ -283,6 +283,38 @@ def render_client_portal():
         return
 
     # Official Status Bar
+    # 1. METADATA & LOCAL TIME SETUP
+    local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
+    
+    # 2. CALCULATE FREEZEDOWN DURATION
+    f_start_date = None
+    day_count_text = ""
+    
+    if pd.notnull(primary_meta.get('Date_Freezedown')):
+        # Convert registry date to a python date object
+        f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
+        # Calculate days elapsed (current date minus start date)
+        days_since = (now_local - f_start_date).days
+        
+        # Format the display text
+        if days_since >= 0:
+            day_count_text = f"🗓️ **Day {days_since}** of Freezedown"
+        else:
+            day_count_text = f"⏳ **{abs(days_since)} Days** until Freezedown Start"
+
+    # 3. RENDER HEADER
+    st.header(f"📊 {primary_meta.get('ProjectName', TARGET_JOB_NUMBER)}")
+    
+    # Create two columns for the status metrics
+    head_c1, head_c2 = st.columns(2)
+    with head_c1:
+        if day_count_text:
+            st.subheader(day_count_text)
+    with head_c2:
+        if f_start_date:
+            st.write(f"**Start Date:** {f_start_date.strftime('%B %d, %Y')}")
+            
     last_approved_local = ensure_tz_convert(p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records are approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
