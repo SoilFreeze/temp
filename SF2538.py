@@ -220,6 +220,9 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
     
     def classify_pipe(row):
         loc, bank = str(row['Location']).upper(), str(row['Bank']).upper()
+        # Explicit check for Ambient/Air fields to avoid misclassification into TP
+        if 'AMBIENT' in loc or 'AMB' in loc or 'AIR' in loc or 'AMBIENT' in bank or 'AMB' in bank: 
+            return 'Ambient'
         if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
         if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
         return 'Temp Pipes (TP)'
@@ -277,7 +280,7 @@ def render_depth_profile_tab(full_p_df):
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                 (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                                  (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
                 if not window.empty:
                     snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
                     fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y'), line=dict(shape='spline', smoothing=0.5)))
@@ -335,7 +338,6 @@ def render_client_portal():
     # 3. DATA FETCHING
     with st.spinner("Synchronizing official records..."):
         all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
-        # Use full_p_df consistently to avoid NameErrors
         full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
@@ -372,45 +374,35 @@ def render_client_portal():
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-                # curve_id uses Job# and Location to find soil curves
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, f"{loc} History", start_view, now_local_ts, 
                     "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
                 ), use_container_width=True)
         pass
-        
-    
-    # --- TAB 2: TEMP vs DEPTH PROFILE ---
+
     with tabs[2]:
         render_depth_profile_tab(full_p_df)
     
     with tabs[3]:
-        # Verified Data Summary Table
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
         pass
        
-    # --- TAB 4: AS BUILT PLAN ---
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
         
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            # Define potential paths where the image might be located
-            # 1. assets/asbuilts/ (Standard structure)
-            # 2. Root directory (Same folder as this script)
-            # 3. assets/ (General asset folder)
             possible_paths = [
                 os.path.join("assets", "asbuilts", asbuilt_filename),
                 asbuilt_filename,
-                os.path.join("assets", hospitals_filename if 'hospitals_filename' in locals() else asbuilt_filename) 
+                os.path.join("assets", asbuilt_filename) 
             ]
             
             img_found = False
             for path in possible_paths:
                 if os.path.exists(path):
-                    # Use use_container_width to ensure it fits the screen
                     st.image(path, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
                     img_found = True
                     break
@@ -419,13 +411,10 @@ def render_client_portal():
                 st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
                 st.info(f"**Action Required:** Ensure the file is uploaded to your GitHub repository in the same folder as this script.")
                 
-                # Debug helper for the admin (shows where the app is looking)
                 with st.expander("Diagnostic Info"):
                     st.write(f"Current Directory: `{os.getcwd()}`")
                     st.write(f"Files in root: `{os.listdir('.')}`")
-
             pass
-            
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
 
