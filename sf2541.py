@@ -41,18 +41,37 @@ def ensure_tz_convert(series, target_tz):
 
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    """Fetches approved client data with a built-in SQL garbage data filter."""
+    """
+    Fetches approved client data with an explicit 12-hour timeline gap connector rule.
+    Bridges transient telemetry dropouts up to 12 hours, while keeping longer station outages blank.
+    """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     query = f"""
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
-        WHERE m.Project = @project_id 
-        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-        AND m.temperature >= -30.0 AND m.temperature <= 120.0
-        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
-        ORDER BY m.timestamp ASC
+        WITH filtered_base AS (
+            SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
+            WHERE m.Project = @project_id 
+              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
+        ),
+        gap_evaluation AS (
+            SELECT 
+                *,
+                -- Evaluate the preceding timestamp on a node-by-node partition scope
+                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_timestamp
+            FROM filtered_base
+        )
+        SELECT 
+            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+        FROM gap_evaluation
+        -- ⏳ 12-HOUR GAP CONNECTOR CRITERIA:
+        -- Retains records if it's the sequence start or if delta stays within the 12 hour operational limit
+        WHERE prev_timestamp IS NULL 
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
+        ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
@@ -169,16 +188,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """
-    Renders the 24 hour Thermal Summary split across 4 structural groups.
-    Completely separates calculations to prevent ambient leakages.
-    """
+    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
-    # Isolate Ambient via text matching first
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
@@ -192,11 +207,8 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    # 24-hour historic tracking window
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    
-    # Create the single latest snapshot packet structure per individual hardware item
     latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
 
     cols = st.columns(4)
@@ -206,7 +218,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         with cols[i]:
             st.markdown(f"### {p_type}")
             
-            # 🛑 LEAKPROOF ISOLATION: Explicitly filter dataset BEFORE computing metrics
             snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
             hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
             
@@ -214,10 +225,8 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
-            # Compute current averages solely out of insulated snapshot arrays
             avg_val = snap_type_df['temperature'].mean()
             
-            # Compute high/low limits using only the values belonging to this category
             if not hist_type_df.empty:
                 high_val = hist_type_df['temperature'].max()
                 low_val = hist_type_df['temperature'].min()
@@ -225,7 +234,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 high_val = snap_type_df['temperature'].max()
                 low_val = snap_type_df['temperature'].min()
 
-            # Render Main Current Metric
             st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
             st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
@@ -235,13 +243,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    """
-    Engineering-grade Vertical Temperature Profiles matching your Dashboard.
-    - Empirical data only (no theoretical lines).
-    - Baseline: First Day Data snapshot (Black Dashed Line).
-    - Freezing Line: Light Blue (Hex #ADD8E6).
-    - Scale: Fixed -20 to 80.
-    """
+    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -266,7 +268,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE ---
+            # --- A. BASELINE CALCULATIONS ---
             baseline_ts = loc_data['timestamp'].min()
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -291,7 +293,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                     hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
-            # --- B. PLOT WEEKLY SNAPSHOTS ---
+            # --- B. WEEKLY SNAPSHOT CALCULATIONS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
@@ -321,10 +323,8 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- C. FREEZING REFERENCE LINE (Light Blue Hex ADD8E6) ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            # --- D. FIXED SCALING & FULL BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -377,7 +377,6 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # FAILSAFE APPLICATION DATA CLAMP
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
     st.title(f"📊 {display_name}")
