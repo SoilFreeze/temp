@@ -422,35 +422,47 @@ def render_client_portal():
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
         
-        # Fallback string if your registry metadata has an empty field or a mismatch
-        if not asbuilt_filename or str(asbuilt_filename).strip() == "":
-            asbuilt_filename = "AsBuiltElizabeth.jpg"
+        # 1. Clean the filename string safely
+        clean_filename = str(asbuilt_filename).strip() if pd.notnull(asbuilt_filename) else ""
         
-        # Prioritize checking your root directory first since it's next to the script
-        possible_paths = [
-            str(asbuilt_filename).strip(),
-            os.path.join("assets", "asbuilts", asbuilt_filename),
-            os.path.join("assets", asbuilt_filename)
-        ]
-        
-        img_found = False
-        for path in possible_paths:
-            if os.path.exists(path):
+        if clean_filename == "":
+            st.info("ℹ️ No as-built site plan has been assigned to this project in the Registry.")
+        else:
+            # 2. Map exact paths to check
+            possible_paths = [
+                clean_filename,
+                os.path.join("assets", "asbuilts", clean_filename),
+                os.path.join("assets", clean_filename)
+            ]
+            
+            target_path = None
+            for p in possible_paths:
+                if os.path.exists(p) and os.path.isfile(p):
+                    target_path = p
+                    break
+            
+            # 3. Render conditionally based on exact file visibility
+            if target_path:
                 try:
-                    with open(path, "rb") as img_file:
-                        img_bytes = img_file.read()
+                    import base64
+                    with open(target_path, "rb") as img_file:
+                        encoded_img = base64.b64encode(img_file.read()).decode()
                     
-                    # We render the raw binary array bundle directly to bypass the static asset URL engine
-                    st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                    img_found = True
-                    break
+                    # 🎯 THE ULTIMATE SHIELD: Inject raw HTML image data.
+                    # This completely strips out st.image() so Streamlit's buggy 
+                    # buildMediaURL JavaScript handler is never called.
+                    mime_type = "image/jpeg" if target_path.lower().endswith(('.jpg', '.jpeg')) else "image/png"
+                    st.markdown(
+                        f'<img src="data:{mime_type};base64,{encoded_img}" style="width:100%; max-width:100%; height:auto;" />',
+                        unsafe_allow_html=True
+                    )
+                    st.caption(f"Project Plan Blueprint: {clean_filename}")
                 except Exception as img_err:
-                    st.error(f"⚠️ Failed to open local image channel: {img_err}")
-                    img_found = True
-                    break
-                    
-        if not img_found:
-            st.error(f"❌ Drawing Asset File Not Found in Repository. Verified lookup name: '{asbuilt_filename}'")
-            st.info("💡 Ensure the file name matches case-for-case on GitHub (e.g., '.jpg' vs '.JPG').")
+                    st.error(f"⚠️ Local file stream reading error: {img_err}")
+            else:
+                # 🛡️ If the file is truly not there, it shows this clean text box and STOPS.
+                st.warning(f"❌ Drawing Asset File Not Found in your GitHub Repository.")
+                st.code(f"Expected File Name: {clean_filename}\nChecked Locations: {possible_paths}", language="text")
+                
 # --- EXECUTION ---
 render_client_portal()
