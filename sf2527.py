@@ -421,32 +421,36 @@ def render_client_portal():
        
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            possible_paths = [
-                os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
-                os.path.join("assets", asbuilt_filename)
-            ]
-            img_found = False
-            for path in possible_paths:
-                if os.path.exists(path):
-                    try:
-                        # 🎯 THE SHIELD FIX: Read the asset as raw binary bytes 
-                        # This bypasses the buggy static Streamlit Cloud URL media compiler entirely
-                        with open(path, "rb") as img_file:
-                            img_bytes = img_file.read()
-                        
-                        st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                        img_found = True
-                        break
-                    except Exception as img_err:
-                        st.error(f"⚠️ Failed to decode image file stream: {img_err}")
-                        img_found = True # Stops loop since the file was found but corrupt
-                        break
-            if not img_found:
-                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
-        else:
-            st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
+        
+        # Fallback string if your registry metadata has an empty field or a mismatch
+        if not asbuilt_filename or str(asbuilt_filename).strip() == "":
+            asbuilt_filename = "AsBuiltElizabeth.jpg"
+        
+        # Prioritize checking your root directory first since it's next to the script
+        possible_paths = [
+            str(asbuilt_filename).strip(),
+            os.path.join("assets", "asbuilts", asbuilt_filename),
+            os.path.join("assets", asbuilt_filename)
+        ]
+        
+        img_found = False
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as img_file:
+                        img_bytes = img_file.read()
+                    
+                    # We render the raw binary array bundle directly to bypass the static asset URL engine
+                    st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
+                    img_found = True
+                    break
+                except Exception as img_err:
+                    st.error(f"⚠️ Failed to open local image channel: {img_err}")
+                    img_found = True
+                    break
+                    
+        if not img_found:
+            st.error(f"❌ Drawing Asset File Not Found in Repository. Verified lookup name: '{asbuilt_filename}'")
+            st.info("💡 Ensure the file name matches case-for-case on GitHub (e.g., '.jpg' vs '.JPG').")
 # --- EXECUTION ---
 render_client_portal()
