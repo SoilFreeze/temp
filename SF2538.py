@@ -171,19 +171,23 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 clean structural groups."""
+    """
+    Renders the Thermal Summary split across 4 clean structural groups.
+    Matches the exact layout, logic, and latest snapshot calculations 
+    of the main global summary dashboard.
+    """
     st.subheader("🌐 24 hour Thermal Summary")
     
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+    # 1. Clean out project local timezones
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
+    # 2. Strict Priority-Based Pipe Classification
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
         
-        # 🛑 LAYER 2: PRIORITY AMBIENT FILTERING
-        # Intercepts 'Ambient' keywords immediately to stop 'S' and 'R' characters from hijacking air logs
+        # Check Ambient FIRST to isolate air temps
         if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
             return 'Ambient'
             
@@ -193,33 +197,59 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
+    # 3. Calculate 24-hour ranges BEFORE cutting down to the latest snapshot
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
+    df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+    
+    # 4. Isolate the absolute LATEST packet entry per individual sensor node
+    # This prevents historical data mass from skewing current averages
+    latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+
     cols = st.columns(4)
     categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
+    
+    # Target benchmarks for percentage calculations
+    kpi_benchmarks = {'Supply (S)': -10, 'Return (R)': 0, 'Temp Pipes (TP)': 32, 'Ambient': None}
 
     for i, p_type in enumerate(categories):
         with cols[i]:
             st.markdown(f"### {p_type}")
-            type_df = df_local[df_local['PipeType'] == p_type]
             
-            if type_df.empty:
+            # Isolate data for this category
+            snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
+            hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
+            
+            if snap_type_df.empty:
                 st.caption("No data available.")
                 continue
 
-            df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+            # Compute current averages from the snapshot (Matches Dashboard)
+            avg_val = snap_type_df['temperature'].mean()
             
-            if not df_24h.empty:
-                target_df = df_24h
+            # Compute 24-hour boundaries from historical dataset
+            if not hist_type_df.empty:
+                high_val = hist_type_df['temperature'].max()
+                low_val = hist_type_df['temperature'].min()
             else:
-                latest_ts = type_df['timestamp'].max()
-                target_df = type_df[type_df['timestamp'] == latest_ts]
-                st.caption(f"⚠️ Last packet: {latest_ts.strftime('%m/%d %I:%M %p')}")
-            
-            avg_val = target_df['temperature'].mean()
-            high_val = target_df['temperature'].max()
-            low_val = target_df['temperature'].min()
+                high_val = snap_type_df['temperature'].max()
+                low_val = snap_type_df['temperature'].min()
 
-            st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
+            # Render Main Average Metric
+            st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
             
+            # Render Percentage Target KPIs
+            kpi_target = kpi_benchmarks[p_type]
+            if kpi_target is not None:
+                total_nodes = len(snap_type_df)
+                nodes_passing = len(snap_type_df[snap_type_df['temperature'] <= kpi_target])
+                pct = (nodes_passing / total_nodes) * 100 if total_nodes > 0 else 0
+                
+                color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+                st.markdown(f"<p style='font-size:0.85rem; color:{color}; margin-top:-10px;'><b>{pct:.0f}%</b> Nodes ≤ {kpi_target}°F</p>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='height:19px;'></div>", unsafe_allow_html=True)
+
+            # Render Structural Ranges
             sub1, sub2 = st.columns(2)
             sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
             sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
