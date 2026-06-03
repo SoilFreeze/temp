@@ -422,13 +422,27 @@ def render_client_portal():
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            possible_paths = [os.path.join("assets", "asbuilts", asbuilt_filename), asbuilt_filename, os.path.join("assets", asbuilt_filename)]
+            possible_paths = [
+                os.path.join("assets", "asbuilts", asbuilt_filename), 
+                asbuilt_filename, 
+                os.path.join("assets", asbuilt_filename)
+            ]
             img_found = False
             for path in possible_paths:
                 if os.path.exists(path):
-                    st.image(path, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                    img_found = True
-                    break
+                    try:
+                        # 🎯 THE SHIELD FIX: Read the asset as raw binary bytes 
+                        # This bypasses the buggy static Streamlit Cloud URL media compiler entirely
+                        with open(path, "rb") as img_file:
+                            img_bytes = img_file.read()
+                        
+                        st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
+                        img_found = True
+                        break
+                    except Exception as img_err:
+                        st.error(f"⚠️ Failed to decode image file stream: {img_err}")
+                        img_found = True # Stops loop since the file was found but corrupt
+                        break
             if not img_found:
                 st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
         else:
