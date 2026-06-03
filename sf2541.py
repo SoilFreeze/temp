@@ -70,7 +70,7 @@ def get_universal_portal_data(project_id):
         -- ⏳ 12-HOUR GAP CONNECTOR CRITERIA:
         -- Retains records if it's the sequence start or if delta stays within the 12 hour operational limit
         WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 8
         ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
