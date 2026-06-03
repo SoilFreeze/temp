@@ -241,11 +241,19 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
-            # Calculate 24h window metrics
+           # Calculate 24h window metrics
             df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
             
-            # Use 24h data if available, otherwise fallback to the most recent packet
-            target_df = df_24h if not df_24h.empty else type_df
+            if not df_24h.empty:
+                target_df = df_24h
+            else:
+                # FALLBACK: Find the single most recent timestamp available for this pipe type
+                latest_timestamp = type_df['timestamp'].max()
+                # Get all records matching that exact last update window (e.g., that hour's/packet's readings)
+                target_df = type_df[type_df['timestamp'] == latest_timestamp]
+                
+                # OPTIONAL: Let the client know the data is older than 24 hours
+                st.caption(f"⚠️ Showing last available data from: {latest_timestamp.strftime('%m/%d %I:%M %p')}")
             
             avg_val = target_df['temperature'].mean()
             high_val = target_df['temperature'].max()
