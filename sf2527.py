@@ -169,12 +169,16 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 structural groups without node percentage metrics."""
+    """
+    Renders the 24 hour Thermal Summary split across 4 structural groups.
+    Completely separates calculations to prevent ambient leakages.
+    """
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
+    # Isolate Ambient via text matching first
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
@@ -188,9 +192,11 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
+    # 24-hour historic tracking window
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
     
+    # Create the single latest snapshot packet structure per individual hardware item
     latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
 
     cols = st.columns(4)
@@ -200,6 +206,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         with cols[i]:
             st.markdown(f"### {p_type}")
             
+            # 🛑 LEAKPROOF ISOLATION: Explicitly filter dataset BEFORE computing metrics
             snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
             hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
             
@@ -207,8 +214,10 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
+            # Compute current averages solely out of insulated snapshot arrays
             avg_val = snap_type_df['temperature'].mean()
             
+            # Compute high/low limits using only the values belonging to this category
             if not hist_type_df.empty:
                 high_val = hist_type_df['temperature'].max()
                 low_val = hist_type_df['temperature'].min()
@@ -216,6 +225,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 high_val = snap_type_df['temperature'].max()
                 low_val = snap_type_df['temperature'].min()
 
+            # Render Main Current Metric
             st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
             st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
@@ -234,7 +244,6 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     """
     st.subheader("📏 Vertical Temperature Profile")
     
-    # Sidebar control panel for historical spans
     st.sidebar.subheader("📐 Profile Settings")
     lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
     
@@ -247,7 +256,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
         st.info("No sensors with valid 'Depth' values found in the Registry.")
         return
 
-    freeze_pt = 32 # Hardcoded to standard Fahrenheit configuration
+    freeze_pt = 32
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
     locations = sorted(depth_df['Location'].unique())
@@ -257,7 +266,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE (True First Week Data) ---
+            # --- A. CALCULATE BASELINE ---
             baseline_ts = loc_data['timestamp'].min()
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
