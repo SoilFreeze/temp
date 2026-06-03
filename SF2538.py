@@ -208,7 +208,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
     """
-    Renders the 24 hour Thermal Summary split by Pipe Type.
+    Renders the 24 hour Thermal Summary split by Pipe Type + Ambient.
     Metrics show 24h Average, High, and Low without staleness alerts.
     """
     st.subheader("🌐 24 hour Thermal Summary")
@@ -229,8 +229,9 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    cols = st.columns(3)
-    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)']
+    # Split layout into 4 columns to include Ambient readings cleanly
+    cols = st.columns(4)
+    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
 
     for i, p_type in enumerate(categories):
         with cols[i]:
@@ -241,25 +242,22 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
-           # Calculate 24h window metrics
+            # Calculate 24h window metrics
             df_24h = type_df[type_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
             
+            # Use 24h window if available, fallback safely to exact last snapshot if stream is delayed
             if not df_24h.empty:
                 target_df = df_24h
             else:
-                # FALLBACK: Find the single most recent timestamp available for this pipe type
-                latest_timestamp = type_df['timestamp'].max()
-                # Get all records matching that exact last update window (e.g., that hour's/packet's readings)
-                target_df = type_df[type_df['timestamp'] == latest_timestamp]
-                
-                # OPTIONAL: Let the client know the data is older than 24 hours
-                st.caption(f"⚠️ Showing last available data from: {latest_timestamp.strftime('%m/%d %I:%M %p')}")
+                latest_ts = type_df['timestamp'].max()
+                target_df = type_df[type_df['timestamp'] == latest_ts]
+                st.caption(f"⚠️ Last update packet: {latest_ts.strftime('%m/%d %I:%M %p')}")
             
             avg_val = target_df['temperature'].mean()
             high_val = target_df['temperature'].max()
             low_val = target_df['temperature'].min()
 
-            # RENDER METRICS (Staleness logic removed)
+            # RENDER METRICS
             st.metric("24h Average", f"{avg_val:.1f}{unit_label}")
             
             sub1, sub2 = st.columns(2)
@@ -351,6 +349,10 @@ def render_client_portal():
     if full_p_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
+
+    # 🛑 CRITICAL DATA CLEANING LAYER:
+    # Drops extreme bad sensor readings/hardware telemetry noise (anything under -30.0°F)
+    full_p_df = full_p_df[full_p_df['temperature'] >= -30.0]
 
     # 4. SINGLE HEADER SECTION
     st.title(f"📊 {display_name}")
