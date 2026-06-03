@@ -45,8 +45,6 @@ def get_universal_portal_data(project_id):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # 🛑 LAYER 1: SQL FILTERING
-    # Hard-filters temperatures between -30°F and 120°F at the database level
     query = f"""
         SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
         JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
@@ -172,22 +170,19 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
     """
-    Renders the Thermal Summary split across 4 clean structural groups.
-    Matches the exact layout, logic, and latest snapshot calculations 
-    of the main global summary dashboard.
+    Renders the 24 hour Thermal Summary split across 4 structural groups.
+    Completely separates calculations to prevent ambient leakages.
     """
     st.subheader("🌐 24 hour Thermal Summary")
     
-    # 1. Clean out project local timezones
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
-    # 2. Strict Priority-Based Pipe Classification
+    # Isolate Ambient via text matching first
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
         
-        # Check Ambient FIRST to isolate air temps
         if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
             return 'Ambient'
             
@@ -197,25 +192,21 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    # 3. Calculate 24-hour ranges BEFORE cutting down to the latest snapshot
+    # 24-hour historic tracking window
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
     
-    # 4. Isolate the absolute LATEST packet entry per individual sensor node
-    # This prevents historical data mass from skewing current averages
+    # Create the single latest snapshot packet structure per individual hardware item
     latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
 
     cols = st.columns(4)
     categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
-    
-    # Target benchmarks for percentage calculations
-    kpi_benchmarks = {'Supply (S)': -10, 'Return (R)': 0, 'Temp Pipes (TP)': 32, 'Ambient': None}
 
     for i, p_type in enumerate(categories):
         with cols[i]:
             st.markdown(f"### {p_type}")
             
-            # Isolate data for this category
+            # 🛑 LEAKPROOF ISOLATION: Explicitly filter dataset BEFORE computing metrics
             snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
             hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
             
@@ -223,10 +214,10 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
-            # Compute current averages from the snapshot (Matches Dashboard)
+            # Compute current averages solely out of insulated snapshot arrays
             avg_val = snap_type_df['temperature'].mean()
             
-            # Compute 24-hour boundaries from historical dataset
+            # Compute high/low limits using only the values belonging to this category
             if not hist_type_df.empty:
                 high_val = hist_type_df['temperature'].max()
                 low_val = hist_type_df['temperature'].min()
@@ -234,64 +225,126 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 high_val = snap_type_df['temperature'].max()
                 low_val = snap_type_df['temperature'].min()
 
-            # Render Main Average Metric
+            # Render Main Current Metric
             st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
-            
-            # Render Percentage Target KPIs
-            kpi_target = kpi_benchmarks[p_type]
-            if kpi_target is not None:
-                total_nodes = len(snap_type_df)
-                nodes_passing = len(snap_type_df[snap_type_df['temperature'] <= kpi_target])
-                pct = (nodes_passing / total_nodes) * 100 if total_nodes > 0 else 0
-                
-                color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-                st.markdown(f"<p style='font-size:0.85rem; color:{color}; margin-top:-10px;'><b>{pct:.0f}%</b> Nodes ≤ {kpi_target}°F</p>", unsafe_allow_html=True)
-            else:
-                st.markdown("<div style='height:19px;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
-            # Render Structural Ranges
             sub1, sub2 = st.columns(2)
             sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
             sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
             st.divider()
 
-def render_depth_profile_tab(full_p_df):
+def render_depth_profile_tab(full_p_df, unit_label, local_tz):
+    """
+    Engineering-grade Vertical Temperature Profiles matching your Dashboard.
+    - Empirical data only (no theoretical lines).
+    - Baseline: First Day Data snapshot (Black Dashed Line).
+    - Freezing Line: Light Blue (Hex #ADD8E6).
+    - Scale: Fixed -20 to 80.
+    """
     st.subheader("📏 Vertical Temperature Profile")
-    full_p_df['Depth_Num'] = pd.to_numeric(full_p_df['Depth'], errors='coerce')
-    depth_only = full_p_df.dropna(subset=['Depth_Num', 'Location']).copy()
     
-    if depth_only.empty:
-        st.info("Vertical profile data is not available for this project.")
+    st.sidebar.subheader("📐 Profile Settings")
+    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
+    
+    df_local = full_p_df.copy()
+    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
+    df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
+    depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
+    
+    if depth_df.empty:
+        st.info("No sensors with valid 'Depth' values found in the Registry.")
         return
 
-    for loc in sorted(depth_only['Location'].unique()):
-        with st.expander(f"📏 Temp vs Depth - {loc}", expanded=True):
-            loc_data = depth_only[depth_only['Location'] == loc].copy()
-            fig_d = go.Figure()
+    freeze_pt = 32
+    now_utc = pd.Timestamp.now(tz='UTC')
+    mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
+    locations = sorted(depth_df['Location'].unique())
+    
+    for loc in locations:
+        with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
+            loc_data = depth_df[depth_df['Location'] == loc].copy()
+            fig = go.Figure()
+
+            # --- A. CALCULATE BASELINE ---
+            baseline_ts = loc_data['timestamp'].min()
+            b_window = loc_data[
+                (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
+                (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
+            ]
             
-            mondays = pd.date_range(end=pd.Timestamp.now(tz='UTC'), periods=4, freq='W-MON')
+            baseline_date_str = ""
+            if not b_window.empty:
+                baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
+                snap_b = (
+                    b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
+                    .sort_values(['NodeNum', 'diff'])
+                    .drop_duplicates('NodeNum')
+                    .sort_values('Depth_Num')
+                )
+                
+                fig.add_trace(go.Scatter(
+                    x=snap_b['temperature'], y=snap_b['Depth_Num'], 
+                    mode='lines', 
+                    name=f'Baseline ({baseline_date_str})',
+                    line=dict(color='black', width=2.5, dash='dash'),
+                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                ))
+            
+            # --- B. PLOT WEEKLY SNAPSHOTS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
-                window = loc_data[(loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                                  (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))]
+                current_loop_date = target_ts.strftime('%Y-%m-%d')
+                
+                if current_loop_date == baseline_date_str:
+                    continue
+                    
+                window = loc_data[
+                    (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
+                    (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
+                ]
+                
                 if not window.empty:
-                    snap_df = window.assign(diff=(window['timestamp'] - target_ts).abs()).sort_values(['NodeNum', 'diff']).drop_duplicates('NodeNum').sort_values('Depth_Num')
-                    fig_d.add_trace(go.Scatter(x=snap_df['temperature'], y=snap_df['Depth_Num'], mode='lines+markers', name=target_ts.strftime('%m/%d/%y'), line=dict(shape='spline', smoothing=0.5)))
+                    snap_w = (
+                        window.assign(diff=(window['timestamp'] - target_ts).abs())
+                        .sort_values(['NodeNum', 'diff'])
+                        .drop_duplicates('NodeNum')
+                        .sort_values('Depth_Num')
+                    )
+                    
+                    fig.add_trace(go.Scatter(
+                        x=snap_w['temperature'], y=snap_w['Depth_Num'], 
+                        mode='lines+markers', 
+                        name=current_loop_date,
+                        line=dict(shape='spline', smoothing=1.1, width=1.5),
+                        marker=dict(size=4),
+                        hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    ))
 
-            max_sensor_depth = loc_data['Depth_Num'].max()
-            y_limit = int(((max_sensor_depth // 40) + 1) * 40) if pd.notnull(max_sensor_depth) else 40
-            max_temp_seen = loc_data['temperature'].max()
-            x_limit = 80 if max_temp_seen > 60 else 60
+            # --- C. FREEZING REFERENCE LINE (Light Blue Hex ADD8E6) ---
+            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            fig_d.add_vline(x=32, line_width=2.5, line_dash="dash", line_color="MediumBlue", annotation_text="32°F FREEZE", annotation_position="top left", layer="above")
-            
-            fig_d.update_layout(
-                plot_bgcolor='white', height=750, margin=dict(r=50, l=50, t=50, b=50),
-                xaxis=dict(title="Temperature (°F)", range=[-20, x_limit], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linewidth=2, linecolor='black'),
-                yaxis=dict(title="Depth (ft)", range=[y_limit, 0], dtick=10, showgrid=True, gridcolor='Silver', showline=True, mirror=True, linewidth=2, linecolor='black'),
-                legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5)
+            # --- D. FIXED SCALING & FULL BOX FRAME ---
+            max_depth = loc_data['Depth_Num'].max()
+            y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
+
+            fig.update_layout(
+                title=f"<b>Temp vs Depth - {loc}</b>",
+                plot_bgcolor='white', 
+                height=800,
+                xaxis=dict(
+                    title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True
+                ),
+                yaxis=dict(
+                    title="Depth (ft)", range=[y_limit, 0], dtick=10,
+                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True
+                ),
+                legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
-            st.plotly_chart(fig_d, use_container_width=True, key=f"depth_profile_{loc}")
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}")
 
 def render_client_portal():
     client = get_bq_client()
@@ -324,7 +377,7 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # 🛑 LAYER 3: BACKUP APPLICATION SPECTRAL CLAMP
+    # FAILSAFE APPLICATION DATA CLAMP
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
     st.title(f"📊 {display_name}")
@@ -358,7 +411,7 @@ def render_client_portal():
                 ), use_container_width=True)
 
     with tabs[2]:
-        render_depth_profile_tab(full_p_df)
+        render_depth_profile_tab(full_p_df, "°F", local_tz)
     
     with tabs[3]:
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
