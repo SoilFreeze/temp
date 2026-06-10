@@ -90,12 +90,14 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-    proj_num = TARGET_JOB_NUMBER
-    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
+
+    # 🟢 FORCE STRING & GRAB FIRST 4 CHARACTERS (e.g., "2541")
+    clean_job_num = str(TARGET_JOB_NUMBER)[:4].strip()
 
     if f_start_date:
         try:
-            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
+            # Look up maximum days using case-insensitive matching
+            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CAST(CurveID AS STRING)) LIKE UPPER('{clean_job_num}%') ORDER BY Day DESC LIMIT 1"
             ref_meta = client.query(ref_q).to_dataframe()
             if not ref_meta.empty:
                 max_days = int(ref_meta['Day'].max())
@@ -103,22 +105,19 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # === PORTAL THEORETICAL CURVE ENGINE ===
+    # 🟢 LOOSE MATCHING FOR MIXED CASING AND SUFFIXES (e.g., "2541-T7-UnSat Fill")
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            
-            # 🟢 FORCE STRING & GRAB FIRST 4 CHARACTERS (e.g., "2541")
-            clean_job_num = str(TARGET_JOB_NUMBER)[:4].strip()
             pure_loc = str(curve_id).strip()
             
-            # Match standard curve names (e.g., '2541-T7-UnSat Fill' or '2541-T7')
+            # Converts everything to UPPERCASE to completely bypass mixed-case text bugs
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE CAST(CurveID AS STRING) LIKE '{clean_job_num}-%'
+                WHERE UPPER(CAST(CurveID AS STRING)) LIKE UPPER('{clean_job_num}-%')
                   AND (
-                    CAST(CurveID AS STRING) LIKE '%-{pure_loc}' 
-                    OR CAST(CurveID AS STRING) LIKE '%-{pure_loc}-%'
+                    UPPER(CAST(CurveID AS STRING)) LIKE UPPER('%-{pure_loc}') 
+                    OR UPPER(CAST(CurveID AS STRING)) LIKE UPPER('%-{pure_loc}-%')
                   )
                 ORDER BY Day
             """
@@ -130,7 +129,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
-                    # Clean up legend label
+                    # Clean up the legend label text safely
                     soil_label = str(cid).replace(f"{clean_job_num}-", "")
                     
                     fig.add_trace(go.Scatter(
@@ -146,8 +145,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                         ),
                         legendrank=1 
                     ))
-        except: 
-            pass
+        except: pass
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
@@ -183,9 +181,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     now_ts = pd.Timestamp.now(tz=display_tz)
     fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
     
-    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-    for m_dt in m_range:
-        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+    try:
+        m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+        for m_dt in m_range:
+            fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+    except: pass
 
     fig.update_layout(
         title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
@@ -203,7 +203,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
-
+                               
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
