@@ -78,6 +78,10 @@ def get_universal_portal_data(project_id):
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
+def natural_sort_key(s):
+    """Splits strings into text and numbers to allow natural sorting (e.g., T2 before T10)"""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
                            display_tz="UTC", f_start_date=None, curve_id=None):
     if df.empty: return go.Figure().update_layout(title="No data available")
@@ -417,30 +421,20 @@ def render_client_portal():
         now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
         start_view = now_local_ts - timedelta(weeks=weeks_view)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
+        # FIXED: Added natural_sort_key to fix T1, T10, T11 issue
+        locations = sorted(
+            [str(loc) for loc in full_p_df['Location'].dropna().unique()],
+            key=natural_sort_key
+        )
+        
         for loc in locations:
-            with st.expander(f"📍 Location Trend: {loc}", expanded=True):
+            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-                
-                # Determine context by inspecting which project spaces are contributing to this location dataset
-                contributing_project_id = loc_data['Project'].iloc[0]
-                active_meta = phase_metadata_lookup.get(contributing_project_id, {'freeze_date': None})
-                
-                # Match against multi-variant files using regular expressions upstream
-                search_id = f"{TARGET_JOB_NUMBER}-{loc}"
-                
                 st.plotly_chart(build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"{loc} History Lifecycle", 
-                    start_view=start_view, 
-                    end_view=now_local_ts, 
-                    unit_mode="Fahrenheit", 
-                    unit_label="°F", 
-                    display_tz=local_tz, 
-                    f_start_date=active_meta['freeze_date'], 
-                    curve_id=search_id
+                    loc_data, f"{loc} History", start_view, now_local_ts, 
+                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
                 ), use_container_width=True)
-
+                
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
     
