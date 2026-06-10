@@ -439,15 +439,15 @@ def render_client_portal():
         now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
         start_view = now_local_ts - timedelta(weeks=weeks_view)
         
-        # Pull distinct sub-phase metadata rows out of the project registry
+        # 1. Map dynamic sub-phase freeze dates from the project registry row items
         phase_meta_lookup = {}
         for _, row in proj_registry.iterrows():
             p_id = row['Project']
-            parts = p_id.split('-')
             phase_meta_lookup[p_id] = {
                 'freeze_date': pd.to_datetime(row['Date_Freezedown']).date() if pd.notnull(row['Date_Freezedown']) else None
             }
         
+        # 2. Grab your naturally sorted unique location array list
         locations = sorted(
             [str(loc) for loc in full_p_df['Location'].dropna().unique()],
             key=natural_sort_key
@@ -457,23 +457,26 @@ def render_client_portal():
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
-                # Dynamically identify which sub-phase table is actively reporting for this location code
-                contributing_project = loc_data['Project'].iloc[0] if not loc_data.empty else TARGET_JOB_NUMBER
-                active_meta = phase_meta_lookup.get(contributing_project, {'freeze_date': None})
-                
-                search_id = f"{TARGET_JOB_NUMBER}-{loc}"
-                
-                st.plotly_chart(build_high_speed_graph(
-                    df=loc_data, 
-                    title=f"{loc} History", 
-                    start_view=start_view, 
-                    end_view=now_local_ts, 
-                    unit_mode="Fahrenheit", 
-                    unit_label="°F", 
-                    display_tz=local_tz, 
-                    f_start_date=active_meta['freeze_date'], # Pass the exact dynamic sub-phase date
-                    curve_id=search_id
-                ), use_container_width=True)
+                if not loc_data.empty:
+                    # Identify which sub-phase row is reporting data for this specific pipe channel
+                    contributing_project = loc_data['Project'].iloc[0]
+                    active_meta = phase_meta_lookup.get(contributing_project, {'freeze_date': None})
+                    
+                    # 🟢 THE FIX: Keep the search token clean and standard (e.g., "2541-TP11")
+                    # This matches your exact database library naming convention perfectly
+                    search_id = f"{TARGET_JOB_NUMBER}-{loc}"
+                    
+                    st.plotly_chart(build_high_speed_graph(
+                        df=loc_data, 
+                        title=f"{loc} History Lifecycle Trend", 
+                        start_view=start_view, 
+                        end_view=now_local_ts, 
+                        unit_mode="Fahrenheit", 
+                        unit_label="°F", 
+                        display_tz=local_tz, 
+                        f_start_date=active_meta['freeze_date'], # Ties standard curves to the correct May or June start date
+                        curve_id=search_id
+                    ), use_container_width=True)
                 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
