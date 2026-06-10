@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 # 1. TARGET CONFIGURATION
 # ===============================================================
 TARGET_JOB_NUMBER = "2541" 
-# ===============================================================
 
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
@@ -20,6 +19,9 @@ PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
 # --- CORE UTILITIES ---
+def natural_sort_key(s):
+    """Splits strings into text and numbers to allow natural sorting (e.g., T2 before T10)"""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 @st.cache_resource
 def get_bq_client():
@@ -77,10 +79,6 @@ def get_universal_portal_data(project_id):
     return client.query(query, job_config=job_config).to_dataframe()
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
-
-def natural_sort_key(s):
-    """Splits strings into text and numbers to allow natural sorting (e.g., T2 before T10)"""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
                            display_tz="UTC", f_start_date=None, curve_id=None):
