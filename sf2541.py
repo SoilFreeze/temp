@@ -350,45 +350,62 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
-    proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
+    # 1. Fetch all matching sub-phase tracking spaces from registry
+    proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%' ORDER BY Project ASC"
     proj_registry = client.query(proj_q).to_dataframe()
 
     if proj_registry.empty:
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
+    # Set master info metadata hooks
     primary_meta = proj_registry.iloc[0].to_dict()
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
-    
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
-    f_start_date = None
-    day_count_text = ""
-    if pd.notnull(primary_meta.get('Date_Freezedown')):
-        f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
-        days_since = (now_local - f_start_date).days
-        day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
-    with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
-        full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
+    # 2. Build multi-phase timeline tracking parameters dynamically
+    all_phases_data = []
+    phase_metadata_lookup = {}
+    
+    st.sidebar.subheader("🏗️ Structural Selection")
+    
+    for _, row in proj_registry.iterrows():
+        p_id = row['Project']
+        p_df = get_universal_portal_data(p_id)
+        if not p_df.empty:
+            all_phases_data.append(p_df)
+            
+            # Map structural components out of the project suffix string
+            # Formats: "2541-Phase1" or default down to single elements safely
+            parts = p_id.split('-')
+            phase_label = parts[1] if len(parts) > 1 else "Phase 1"
+            
+            phase_metadata_lookup[p_id] = {
+                'label': phase_label,
+                'freeze_date': pd.to_datetime(row['Date_Freezedown']).date() if pd.notnull(row['Date_Freezedown']) else None
+            }
+
+    full_p_df = pd.concat(all_phases_data) if all_phases_data else pd.DataFrame()
 
     if full_p_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
-
     st.title(f"📊 {display_name}")
     
+    # 3. Print out descriptive timeline tracking summaries in layout header columns
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
-    head_c1, head_c2 = st.columns(2)
-    with head_c1:
-        if day_count_text: st.subheader(day_count_text)
-    with head_c2:
-        if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
+    head_cols = st.columns(len(phase_metadata_lookup))
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
+    
+    for idx, (p_id, meta) in enumerate(phase_metadata_lookup.items()):
+        with head_cols[idx]:
+            if meta['freeze_date']:
+                days_since = (now_local - meta['freeze_date']).days
+                day_txt = f"🗓️ **{meta['label']}: Day {max(0, days_since)}**" if days_since >= 0 else f"⏳ **{meta['label']}: {abs(days_since)} Days until Start**"
+                st.markdown(f"{day_txt} <small>(Start: {meta['freeze_date'].strftime('%b %d')})</small>", unsafe_allow_html=True)
 
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
@@ -402,11 +419,26 @@ def render_client_portal():
         
         locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
         for loc in locations:
-            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
+            with st.expander(f"📍 Location Trend: {loc}", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                
+                # Determine context by inspecting which project spaces are contributing to this location dataset
+                contributing_project_id = loc_data['Project'].iloc[0]
+                active_meta = phase_metadata_lookup.get(contributing_project_id, {'freeze_date': None})
+                
+                # Match against multi-variant files using regular expressions upstream
+                search_id = f"{TARGET_JOB_NUMBER}-{loc}"
+                
                 st.plotly_chart(build_high_speed_graph(
-                    loc_data, f"{loc} History", start_view, now_local_ts, 
-                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
+                    df=loc_data, 
+                    title=f"{loc} History Lifecycle", 
+                    start_view=start_view, 
+                    end_view=now_local_ts, 
+                    unit_mode="Fahrenheit", 
+                    unit_label="°F", 
+                    display_tz=local_tz, 
+                    f_start_date=active_meta['freeze_date'], 
+                    curve_id=search_id
                 ), use_container_width=True)
 
     with tabs[2]:
@@ -417,6 +449,10 @@ def render_client_portal():
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
+       
+    with tabs[4]:
+        # Keeps existing image byte-reader mechanism unchanged...
+        pass
        
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
