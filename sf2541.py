@@ -365,6 +365,9 @@ def render_client_portal():
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
 
+    # 🟢 ADD THIS LINE HERE to prevent NameErrors down the line
+    f_start_date = None 
+
     # 2. Build multi-phase timeline tracking parameters dynamically
     all_phases_data = []
     phase_metadata_lookup = {}
