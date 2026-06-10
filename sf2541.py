@@ -90,13 +90,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-
+    
     # 🟢 FORCE STRING & GRAB FIRST 4 CHARACTERS (e.g., "2541")
     clean_job_num = str(TARGET_JOB_NUMBER)[:4].strip()
 
     if f_start_date:
         try:
-            # Look up maximum days using case-insensitive matching
             ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CAST(CurveID AS STRING)) LIKE UPPER('{clean_job_num}%') ORDER BY Day DESC LIMIT 1"
             ref_meta = client.query(ref_q).to_dataframe()
             if not ref_meta.empty:
@@ -105,19 +104,22 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
-    # 🟢 LOOSE MATCHING FOR MIXED CASING AND SUFFIXES (e.g., "2541-T7-UnSat Fill")
+    # 🟢 THE MATCHING FIXED LOGIC:
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            pure_loc = str(curve_id).strip()
             
-            # Converts everything to UPPERCASE to completely bypass mixed-case text bugs
+            # Safely extract just the physical location token (e.g., "T7") regardless of prefix padding
+            pure_loc = str(curve_id).split('-')[-1].strip()
+            
+            # Robust wildcard matching that handles custom description tags like "-UnSat Fill" flawlessly
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CAST(CurveID AS STRING)) LIKE UPPER('{clean_job_num}-%')
+                WHERE UPPER(CAST(CurveID AS STRING)) LIKE '{clean_job_num}-%'
                   AND (
-                    UPPER(CAST(CurveID AS STRING)) LIKE UPPER('%-{pure_loc}') 
-                    OR UPPER(CAST(CurveID AS STRING)) LIKE UPPER('%-{pure_loc}-%')
+                    UPPER(CAST(CurveID AS STRING)) LIKE '%-{pure_loc}' 
+                    OR UPPER(CAST(CurveID AS STRING)) LIKE '%-{pure_loc}-%'
+                    OR UPPER(CAST(CurveID AS STRING)) LIKE '%-{pure_loc} %'
                   )
                 ORDER BY Day
             """
@@ -129,20 +131,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
-                    # Clean up the legend label text safely
+                    # Keep your custom description tag inside the graph legend cleanly!
                     soil_label = str(cid).replace(f"{clean_job_num}-", "")
                     
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, 
-                        name=f"<b>Goal: {soil_label}</b>", 
-                        mode='lines',
-                        line=dict(
-                            color='rgba(80, 80, 80, 0.9)', 
-                            width=3.5, 
-                            dash=dash_styles[idx % len(dash_styles)], 
-                            shape='spline', 
-                            smoothing=1.3
-                        ),
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
+                        line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
         except: pass
