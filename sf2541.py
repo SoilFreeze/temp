@@ -104,49 +104,41 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         except: pass
 
     # Locate inside build_high_speed_graph() in Portal.py
+    # Locate inside build_high_speed_graph() in Portal.py
     if curve_id and f_start_date:
         try:
-            dash_styles = ['dash', 'dashdot', 'dot', 'longdash']
-            gray_shades = ['rgba(40,40,40,0.85)', 'rgba(80,80,80,0.75)', 'rgba(120,120,120,0.7)']
+            dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
             
-            # Extract the pure pipe identifier trailing string (e.g., TP11)
-            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
+            # Extract just the pure location token (e.g., 'T7' or 'TP11')
+            pure_loc = str(curve_id).split('-')[-1].strip()
             
-            # Flexible regex lookup to safely scan complex multi-segment file names
+            # 🟢 FIXED: Changed from strict "=" to REGEXP_CONTAINS 
+            # This allows suffixes like "-UnSat Fill" while ensuring it matches '2541' and 'T7'
             target_q = f"""
-                SELECT CurveID, Day, Temp 
-                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE REGEXP_CONTAINS(CurveID, r'^{TARGET_JOB_NUMBER}.*{loc_part}$')
+                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE REGEXP_CONTAINS(UPPER(CurveID), r'^{clean_job_num}.*-{pure_loc}\\b')
+                   OR REGEXP_CONTAINS(UPPER(CurveID), r'^{clean_job_num}.*-{pure_loc}-')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
             
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
-                    # Tie the reference curve timeline directly to the active loop start date
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     
-                    # Clean up the display name label by stripping out the project prefix tracking token
-                    label_clean = str(cid).replace(f"{TARGET_JOB_NUMBER}-", "").replace(f"-{loc_part}", "")
-                    display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
+                    # Clean up the legend label so it shows your custom descriptor nicely!
+                    soil_label = str(cid).replace(f"{clean_job_num}-", "")
                     
                     fig.add_trace(go.Scatter(
                         x=c_df['timestamp'], y=ref_y, 
-                        name=f"<b>{display_label}</b>", 
+                        name=f"<b>Goal: {soil_label}</b>", 
                         mode='lines',
-                        line=dict(
-                            color=gray_shades[idx % len(gray_shades)], 
-                            width=3.5, 
-                            dash=dash_styles[idx % len(dash_styles)], 
-                            shape='spline', 
-                            smoothing=1.3
-                        ),
+                        line=dict(color='rgba(60, 60, 60, 0.85)', width=3.5, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
-        except: 
-            pass
+        except: pass
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
