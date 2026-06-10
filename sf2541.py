@@ -44,8 +44,8 @@ def ensure_tz_convert(series, target_tz):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches approved client data with an explicit 12-hour timeline gap connector rule.
-    Bridges transient telemetry dropouts up to 12 hours, while keeping longer station outages blank.
+    Fetches approved client data using dynamic row-level boundary joins 
+    to prevent cross-phase data truncation.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -55,24 +55,20 @@ def get_universal_portal_data(project_id):
             SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
             JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
             WHERE m.Project = @project_id 
+              -- Joins the timeline criteria exactly on each sub-phase's start date
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
               AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
         ),
         gap_evaluation AS (
-            SELECT 
-                *,
-                -- Evaluate the preceding timestamp on a node-by-node partition scope
+            SELECT *,
                 LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_timestamp
             FROM filtered_base
         )
-        SELECT 
-            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+        SELECT Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
         FROM gap_evaluation
-        -- ⏳ 12-HOUR GAP CONNECTOR CRITERIA:
-        -- Retains records if it's the sequence start or if delta stays within the 12 hour operational limit
         WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 8
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 12
         ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
@@ -107,30 +103,50 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
         except: pass
 
+    # Locate inside build_high_speed_graph() in Portal.py
     if curve_id and f_start_date:
         try:
-            dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
+            dash_styles = ['dash', 'dashdot', 'dot', 'longdash']
+            gray_shades = ['rgba(40,40,40,0.85)', 'rgba(80,80,80,0.75)', 'rgba(120,120,120,0.7)']
+            
+            # Extract the pure pipe identifier trailing string (e.g., TP11)
+            loc_part = str(curve_id).split('-')[-1].strip() if curve_id else ""
+            
+            # Flexible regex lookup to safely scan complex multi-segment file names
             target_q = f"""
-                SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
-                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
+                SELECT CurveID, Day, Temp 
+                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
+                WHERE REGEXP_CONTAINS(CurveID, r'^{TARGET_JOB_NUMBER}.*{loc_part}$')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
             
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
+                    # Tie the reference curve timeline directly to the active loop start date
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    soil_label = str(cid).split('-')[-1].strip()
+                    
+                    # Clean up the display name label by stripping out the project prefix tracking token
+                    label_clean = str(cid).replace(f"{TARGET_JOB_NUMBER}-", "").replace(f"-{loc_part}", "")
+                    display_label = f"Goal: {label_clean}" if label_clean != loc_part else f"Goal: {loc_part}"
                     
                     fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
-                        line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
+                        x=c_df['timestamp'], y=ref_y, 
+                        name=f"<b>{display_label}</b>", 
+                        mode='lines',
+                        line=dict(
+                            color=gray_shades[idx % len(gray_shades)], 
+                            width=3.5, 
+                            dash=dash_styles[idx % len(dash_styles)], 
+                            shape='spline', 
+                            smoothing=1.3
+                        ),
                         legendrank=1 
                     ))
-        except: pass
+        except: 
+            pass
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
@@ -417,12 +433,21 @@ def render_client_portal():
     with tabs[0]:
         render_summary_tab(full_p_df, "°F", local_tz)
 
+    # Locate inside render_client_portal() under Tab 2 (Timeline Analysis)
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
         start_view = now_local_ts - timedelta(weeks=weeks_view)
         
-        # FIXED: Added natural_sort_key to fix T1, T10, T11 issue
+        # Pull distinct sub-phase metadata rows out of the project registry
+        phase_meta_lookup = {}
+        for _, row in proj_registry.iterrows():
+            p_id = row['Project']
+            parts = p_id.split('-')
+            phase_meta_lookup[p_id] = {
+                'freeze_date': pd.to_datetime(row['Date_Freezedown']).date() if pd.notnull(row['Date_Freezedown']) else None
+            }
+        
         locations = sorted(
             [str(loc) for loc in full_p_df['Location'].dropna().unique()],
             key=natural_sort_key
@@ -431,9 +456,23 @@ def render_client_portal():
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                
+                # Dynamically identify which sub-phase table is actively reporting for this location code
+                contributing_project = loc_data['Project'].iloc[0] if not loc_data.empty else TARGET_JOB_NUMBER
+                active_meta = phase_meta_lookup.get(contributing_project, {'freeze_date': None})
+                
+                search_id = f"{TARGET_JOB_NUMBER}-{loc}"
+                
                 st.plotly_chart(build_high_speed_graph(
-                    loc_data, f"{loc} History", start_view, now_local_ts, 
-                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
+                    df=loc_data, 
+                    title=f"{loc} History", 
+                    start_view=start_view, 
+                    end_view=now_local_ts, 
+                    unit_mode="Fahrenheit", 
+                    unit_label="°F", 
+                    display_tz=local_tz, 
+                    f_start_date=active_meta['freeze_date'], # Pass the exact dynamic sub-phase date
+                    curve_id=search_id
                 ), use_container_width=True)
                 
     with tabs[2]:
