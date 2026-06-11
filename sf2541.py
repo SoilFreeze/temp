@@ -51,7 +51,8 @@ def natural_sort_key(s):
 def get_universal_portal_data(project_id):
     """
     Fetches approved client telemetry, surgically bound between the deployment's 
-    Start_Date and End_Date as defined in the node registry.
+    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
+    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -76,11 +77,18 @@ def get_universal_portal_data(project_id):
               ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
             WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-              -- SURGICAL TIMELINE CLIP: Restrict telemetry to registry window rules
+              
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
               AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
               AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
+              
+              -- 🔒 EXCLUSION FILTER: Drop masked, bad data, and exclude "Office" or "Other" spaces
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND n.SensorStatus IN ('On Project', 'Available')
+              
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
-              AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
         ),
         gap_evaluation AS (
             SELECT 
@@ -144,7 +152,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    # Generate clean placement labels for position tracking
     def get_position_string(row):
         depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
         if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
@@ -156,11 +163,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Determine unique positions for static color mapping context
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Identify the latest node context checking in for each position to clean legend
+    # Identify the latest node context checking in for each position to deduplicate legend display
     latest_nodes_by_pos = {}
     for pos in unique_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos]
@@ -181,18 +187,14 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         active_node = latest_nodes_by_pos[pos]
         
-        # Display the complete history, but assign names based only on the latest active node
         display_name = f"{pos} ({active_node})"
-        
-        # LEGEND SHIELD CONTROL: Only toggle visibility on the chart for the current active asset link
-        show_in_legend = True
         
         fig.add_trace(go.Scatter(
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
-            showlegend=show_in_legend,
+            showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
             text=pos_df['NodeNum']
         ))
@@ -492,6 +494,7 @@ def render_client_portal():
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
             possible_paths = [
                 os.path.join("assets", "asbuilts", asbuilt_filename), 
+                asbuilt_filename, 
                 os.path.join("assets", asbuilt_filename)
             ]
             img_found = False
