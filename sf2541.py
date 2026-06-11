@@ -20,8 +20,12 @@ DATASET_ID = "Temperature"
 
 # --- CORE UTILITIES ---
 def natural_sort_key(s):
-    """Splits strings into text and numbers to allow natural sorting (e.g., T2 before T10)"""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+    """Splits strings into text and numbers to allow natural sorting, with a fallback safety shield for NaNs."""
+    # 🛡️ IF THE VALUE IS BLANK, NULL, OR FLOATING-POINT NAN, FORWARD A SAFE PLACEHOLDER INTEGER
+    if pd.isna(s) or str(s).strip().lower() in ['nan', 'null', '']:
+        return [9999]  # Anchors empty entries cleanly at the very bottom of your list out of the way
+        
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s).strip())]
 
 @st.cache_resource
 def get_bq_client():
