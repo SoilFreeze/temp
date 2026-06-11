@@ -99,16 +99,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    if f_start_date:
-        try:
-            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
-            ref_meta = client.query(ref_q).to_dataframe()
-            if not ref_meta.empty:
-                max_days = int(ref_meta['Day'].max())
-                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
-        except: pass
-
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
@@ -401,16 +391,43 @@ def render_client_portal():
 
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-        now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-        start_view = now_local_ts - timedelta(weeks=weeks_view)
         
         locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                
+                # --- PHASE-SPECIFIC WINDOW ALIGNMENT FIXED RULES ---
+                # 1. Look up the specific phase project code for this location grouping
+                matched_project_id = loc_data['Project'].iloc[0]
+                phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
+                
+                # Default boundary fallbacks
+                loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
+                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                loc_f_start_date = f_start_date
+                
+                if not phase_row.empty:
+                    raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
+                    if pd.notnull(raw_phase_fd):
+                        loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
+                        # Override start window to sit exactly on the phase start date
+                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                        
+                        # If a specific history timeline weeks span is requested, pivot backwards from the phase's latest timestamp
+                        if weeks_view:
+                            loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                
                 st.plotly_chart(build_high_speed_graph(
-                    loc_data, f"{loc} History", start_view, now_local_ts, 
-                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
+                    loc_data, 
+                    f"{loc} History", 
+                    loc_start_view, 
+                    loc_last_data_ts + timedelta(hours=2), 
+                    "Fahrenheit", 
+                    "°F", 
+                    local_tz, 
+                    loc_f_start_date, 
+                    f"{TARGET_JOB_NUMBER}-{loc}"
                 ), use_container_width=True)
 
     with tabs[2]:
