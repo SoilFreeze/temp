@@ -50,69 +50,46 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches approved client telemetry, surgically bound between the deployment's 
-    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
-    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
+    Fetches ALL historical and streaming telemetry explicitly assigned to a project.
+    Bypasses registry timeline window constraints to capture pre-freeze/backfilled chunks,
+    while strictly filtering out unapproved records, baddata, masked data, and office loops.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     query = f"""
-        WITH filtered_base AS (
-            SELECT 
-                m.Project, 
-                m.NodeNum, 
-                n.Bank, 
-                n.Location, 
-                n.Depth, 
-                m.temperature, 
-                m.timestamp, 
-                m.approval_status,
-                n.Start_Date,
-                n.End_Date
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-            JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
-            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-              
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
-              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
-              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
-              
-              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
-              
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
-              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
-              
-              AND n.SensorStatus IN ('On Project', 'Available')
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
-        ),
-        gap_evaluation AS (
-            SELECT 
-                *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
-            FROM filtered_base
-        )
         SELECT 
-            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-        FROM gap_evaluation
-        WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
-        ORDER BY timestamp ASC
+            m.Project, 
+            m.NodeNum, 
+            n.Bank, 
+            n.Location, 
+            n.Depth, 
+            m.temperature, 
+            m.timestamp, 
+            m.approval_status
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+        -- Soft-link against the asset registry to pull down location tracking names
+        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
+          ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+        WHERE (CAST(m.Project AS STRING) = CAST(@project_id AS STRING) OR CAST(n.Project AS STRING) = CAST(@project_id AS STRING))
+          
+          -- 🔒 MANDATORY GLOBAL FILTERS (Only drops explicitly rejected or unapproved rows)
+          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'PENDING'  -- Forces only approved data
+          
+          -- 🚫 ABSOLUTE OFFICE / DEK EXCLUSION RULES
+          AND UPPER(TRIM(CAST(COALESCE(n.Project, '') AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%DESK%'
+          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%TEST%'
+          
+          -- Temperature Boundary Guard
+          AND m.temperature >= -30.0 AND m.temperature <= 120.0
+        ORDER BY m.timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
-
+    
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
