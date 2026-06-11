@@ -50,33 +50,47 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches approved client data with an explicit 12-hour timeline gap connector rule.
-    Bridges transient telemetry dropouts up to 12 hours, while keeping longer station outages blank.
+    Fetches approved client telemetry, surgically bound between the deployment's 
+    Start_Date and End_Date as defined in the node registry.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     query = f"""
         WITH filtered_base AS (
-            SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{PROJECT_REGISTRY_TABLE}` p ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
+            SELECT 
+                m.Project, 
+                m.NodeNum, 
+                n.Bank, 
+                n.Location, 
+                n.Depth, 
+                m.temperature, 
+                m.timestamp, 
+                m.approval_status,
+                n.Start_Date,
+                n.End_Date
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+            JOIN `{PROJECT_REGISTRY_TABLE}` p 
+              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
             WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
               AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              -- SURGICAL TIMELINE CLIP: Restrict telemetry to registry window rules
+              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
+              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
               AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
         ),
         gap_evaluation AS (
             SELECT 
                 *,
-                -- Evaluate the preceding timestamp on a node-by-node partition scope
-                LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp ASC) as prev_timestamp
+                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
             FROM filtered_base
         )
         SELECT 
             Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
         FROM gap_evaluation
-        -- ⏳ 12-HOUR GAP CONNECTOR CRITERIA:
-        -- Retains records if it's the sequence start or if delta stays within the 12 hour operational limit
         WHERE prev_timestamp IS NULL 
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 8
         ORDER BY timestamp ASC
@@ -130,32 +144,57 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    def get_legend_sort_key(node_id, df):
-        row = df[df['NodeNum'] == node_id].iloc[0]
+    # Generate clean placement labels for position tracking
+    def get_position_string(row):
+        depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            return str(bank_val)
+        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: 
+            return f"{depth_val}ft"
+        else: 
+            return str(loc_val)
+
+    plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
+
+    # Determine unique positions for static color mapping context
+    unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
+    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
+
+    # Identify the latest node context checking in for each position to clean legend
+    latest_nodes_by_pos = {}
+    for pos in unique_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos]
+        latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
+        latest_nodes_by_pos[pos] = latest_node
+
+    def get_legend_sort_key(pos_str, df):
+        row = df[df['PositionLabel'] == pos_str].iloc[0]
         bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
         depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
-        if 'R' in bank: return (0, bank, node_id) 
-        if 'S' in bank: return (1, bank, node_id)
-        return (2, depth, node_id)
+        if 'R' in bank: return (0, bank, pos_str) 
+        if 'S' in bank: return (1, bank, pos_str)
+        return (2, depth, pos_str)
 
-    unique_nodes = plot_df['NodeNum'].unique()
-    sorted_nodes = sorted(unique_nodes, key=lambda x: get_legend_sort_key(x, plot_df))
+    sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    for i, sn in enumerate(sorted_nodes):
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
-        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
+    for pos in sorted_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
+        active_node = latest_nodes_by_pos[pos]
         
-        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-            display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val): 
-            display_name = f"{depth_val}ft ({sn})"
-        else: 
-            display_name = f"{loc_val} ({sn})"
+        # Display the complete history, but assign names based only on the latest active node
+        display_name = f"{pos} ({active_node})"
+        
+        # LEGEND SHIELD CONTROL: Only toggle visibility on the chart for the current active asset link
+        show_in_legend = True
         
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'], name=display_name, mode='lines',
-            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            x=pos_df['timestamp'], y=pos_df['temperature'], 
+            name=display_name, 
+            mode='lines',
+            line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+            showlegend=show_in_legend,
+            hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+            text=pos_df['NodeNum']
         ))
         
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
@@ -453,7 +492,6 @@ def render_client_portal():
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
             possible_paths = [
                 os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
                 os.path.join("assets", asbuilt_filename)
             ]
             img_found = False
