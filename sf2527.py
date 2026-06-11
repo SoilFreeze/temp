@@ -106,7 +106,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if curve_id and f_start_date:
@@ -177,15 +176,16 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
+    # --- FIX HERE: Loop strictly by POSITION to merge separate log units together ---
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
-        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
+        # Display the position name along with the active node currently monitoring it
+        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
-        pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
@@ -195,7 +195,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 gap_row = pos_df.loc[idx].copy()
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None kills the connecting segment trace
+                gap_row['temperature'] = None  # None breaks the connecting line trace segment
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -204,10 +204,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
+            connectgaps=False,  # Enforces explicit cuts at None row indices
+            # Locked color mapping based strictly on position index assignment
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+            # Dynamically reads changing NodeNums point-by-point along the continuous line
             text=pos_df['NodeNum']
         ))
         
