@@ -129,6 +129,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
+    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if curve_id and f_start_date:
@@ -177,11 +178,16 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     ]
 
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
-    
-    # 🎨 COLOR FIX: Map locked colors to positions, completely independent of changing NodeNums
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Determine sorting layout logic for the side legend tracking panel
+    # Identify the latest node context checking in for each position to deduplicate legend display
+    latest_nodes_by_pos = {}
+    for pos in unique_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos]
+        if not pos_df.empty:
+            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
+            latest_nodes_by_pos[pos] = latest_node
+
     def get_legend_sort_key(pos_str, df):
         sub_df = df[df['PositionLabel'] == pos_str]
         if sub_df.empty: return (3, 0, pos_str)
@@ -194,16 +200,15 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    # 🔗 MOUNT ENGINE: Loops over positions, completely bridging split historical serial logs
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
+        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
-        # Pull the absolute newest streaming node context assigned to this specific hole for display purposes
-        active_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
+        pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
@@ -213,7 +218,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 gap_row = pos_df.loc[idx].copy()
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None turns off connecting segment traces
+                gap_row['temperature'] = None  # None kills the connecting segment trace
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -222,11 +227,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces clear break lines across outaged timeline slots
+            connectgaps=False,  # Enforces physical segment termination at None rows
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-            # Dynamically tracks changing NodeNums point-by-point inside the unified line text frame
             text=pos_df['NodeNum']
         ))
         
@@ -456,6 +460,7 @@ def render_client_portal():
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
+        --------------
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
