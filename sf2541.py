@@ -82,12 +82,19 @@ def get_universal_portal_data(project_id):
               AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
               AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
               
-              -- 🔒 EXCLUSION FILTER: Drop masked, bad data, and exclude "Office" or "Other" spaces
+              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND n.SensorStatus IN ('On Project', 'Available')
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
               
+              AND n.SensorStatus IN ('On Project', 'Available')
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         gap_evaluation AS (
@@ -100,7 +107,7 @@ def get_universal_portal_data(project_id):
             Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
         FROM gap_evaluation
         WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 8
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
         ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
@@ -189,10 +196,22 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         
         display_name = f"{pos} ({active_node})"
         
+        # ⏱️ 24-HOUR CHART GAP BUILDER
+        # Inserts a row containing a None value when the time distance between readings exceeds 24 hours.
+        # This causes Plotly to leave a visible break/gap in the line graph.
+        pos_df['time_delta'] = pos_df['timestamp'].diff()
+        gap_rows = pos_df[pos_df['time_delta'] > timedelta(hours=24)].copy()
+        
+        if not gap_rows.empty:
+            gap_rows['timestamp'] = gap_rows['timestamp'] - timedelta(seconds=1)
+            gap_rows['temperature'] = None
+            pos_df = pd.concat([pos_df, gap_rows]).sort_values('timestamp').reset_index(drop=True)
+        
         fig.add_trace(go.Scatter(
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
+            connectgaps=False,  # Enforces explicit line breaking at None values
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
@@ -494,7 +513,6 @@ def render_client_portal():
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
             possible_paths = [
                 os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
                 os.path.join("assets", asbuilt_filename)
             ]
             img_found = False
