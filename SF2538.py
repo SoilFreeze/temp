@@ -19,6 +19,10 @@ st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>"""
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
+# Migration Targets for Google Sheets / Native Table Migration Phase
+PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+
 # --- CORE UTILITIES ---
 
 @st.cache_resource
@@ -39,20 +43,72 @@ def ensure_tz_convert(series, target_tz):
         return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
     return series.dt.tz_convert(target_tz)
 
+def natural_sort_key(s):
+    """Splits text and numbers to allow natural sorting (e.g., T1, T2, T3 instead of T1, T10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
-    """Fetches approved client data with a built-in SQL garbage data filter."""
+    """
+    Fetches approved client telemetry, surgically bound between the deployment's 
+    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
+    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
+    """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     query = f"""
-        SELECT m.* FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        JOIN `{PROJECT_ID}.{DATASET_ID}.project_registry` p ON m.Project = p.Project
-        WHERE m.Project = @project_id 
-        AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-        AND m.temperature >= -30.0 AND m.temperature <= 120.0
-        AND UPPER(CAST(m.approval_status AS STRING)) IN ('TRUE', '1')
-        ORDER BY m.timestamp ASC
+        WITH filtered_base AS (
+            SELECT 
+                m.Project, 
+                m.NodeNum, 
+                n.Bank, 
+                n.Location, 
+                n.Depth, 
+                m.temperature, 
+                m.timestamp, 
+                m.approval_status,
+                n.Start_Date,
+                n.End_Date
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+            JOIN `{PROJECT_REGISTRY_TABLE}` p 
+              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
+            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
+              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
+              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
+              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
+              
+              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
+              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
+              
+              AND n.SensorStatus IN ('On Project', 'Available')
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+        ),
+        gap_evaluation AS (
+            SELECT 
+                *,
+                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
+            FROM filtered_base
+        )
+        SELECT 
+            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+        FROM gap_evaluation
+        WHERE prev_timestamp IS NULL 
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
+        ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
@@ -75,16 +131,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     final_end_view, final_start_view = end_view, start_view
     proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
-
-    if f_start_date:
-        try:
-            ref_q = f"SELECT Day FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` WHERE UPPER(CurveID) LIKE UPPER('{proj_num}%') ORDER BY Day DESC LIMIT 1"
-            ref_meta = client.query(ref_q).to_dataframe()
-            if not ref_meta.empty:
-                max_days = int(ref_meta['Day'].max())
-                final_start_view = pd.Timestamp(f_start_date) - pd.Timedelta(days=1)
-                final_end_view = pd.Timestamp(f_start_date) + pd.Timedelta(days=max_days + 1)
-        except: pass
 
     if curve_id and f_start_date:
         try:
@@ -113,32 +159,82 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    def get_legend_sort_key(node_id, df):
-        row = df[df['NodeNum'] == node_id].iloc[0]
+    def get_position_string(row):
+        depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            return str(bank_val)
+        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: 
+            return f"{depth_val}ft"
+        else: 
+            return str(loc_val)
+
+    plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
+
+    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
+    plot_df = plot_df[
+        (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
+    ]
+
+    unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
+    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
+
+    # Identify the latest node context checking in for each position to deduplicate legend display
+    latest_nodes_by_pos = {}
+    for pos in unique_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos]
+        if not pos_df.empty:
+            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
+            latest_nodes_by_pos[pos] = latest_node
+
+    def get_legend_sort_key(pos_str, df):
+        sub_df = df[df['PositionLabel'] == pos_str]
+        if sub_df.empty: return (3, 0, pos_str)
+        row = sub_df.iloc[0]
         bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
         depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
-        if 'R' in bank: return (0, bank, node_id) 
-        if 'S' in bank: return (1, bank, node_id)
-        return (2, depth, node_id)
+        if 'R' in bank: return (0, bank, pos_str) 
+        if 'S' in bank: return (1, bank, pos_str)
+        return (2, depth, pos_str)
 
-    unique_nodes = plot_df['NodeNum'].unique()
-    sorted_nodes = sorted(unique_nodes, key=lambda x: get_legend_sort_key(x, plot_df))
+    sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    for i, sn in enumerate(sorted_nodes):
-        s_df = plot_df[plot_df['NodeNum'] == sn].sort_values('timestamp')
-        depth_val, bank_val, loc_val = s_df['Depth'].iloc[0], s_df['Bank'].iloc[0], s_df['Location'].iloc[0]
+    for pos in sorted_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
+        if pos_df.empty: continue
+        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
-        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-            display_name = f"{bank_val} ({sn})"
-        elif pd.notnull(depth_val): 
-            display_name = f"{depth_val}ft ({sn})"
-        else: 
-            display_name = f"{loc_val} ({sn})"
+        display_name = f"{pos} ({active_node})"
+        
+        # ⏱️ 24-HOUR CHART GAP BUILDER
+        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
+        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
+        pos_df = pos_df.sort_values('timestamp')
+        time_deltas = pos_df['timestamp'].diff()
+        gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
+        
+        if not gap_indices.empty:
+            inserted_gaps = []
+            for idx in gap_indices:
+                gap_row = pos_df.loc[idx].copy()
+                # Place the gap timestamp exactly 1 second after the previous valid timestamp
+                prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
+                gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
+                gap_row['temperature'] = None  # None kills the connecting segment trace
+                inserted_gaps.append(gap_row)
+            
+            pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
         
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], y=s_df['temperature'], name=display_name, mode='lines',
-            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b><br>Temp: %{y:.1f}" + unit_label + "<extra></extra>"
+            x=pos_df['timestamp'], y=pos_df['temperature'], 
+            name=display_name, 
+            mode='lines',
+            connectgaps=False,  # Enforces physical segment termination at None rows
+            line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+            showlegend=True,
+            hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+            text=pos_df['NodeNum']
         ))
         
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
@@ -169,16 +265,12 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """
-    Renders the 24 hour Thermal Summary split across 4 structural groups.
-    Completely separates calculations to prevent ambient leakages.
-    """
+    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
-    # Isolate Ambient via text matching first
     def classify_pipe(row):
         loc = str(row.get('Location', '')).upper()
         bank = str(row.get('Bank', '')).upper()
@@ -192,11 +284,8 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    # 24-hour historic tracking window
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    
-    # Create the single latest snapshot packet structure per individual hardware item
     latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
 
     cols = st.columns(4)
@@ -206,7 +295,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         with cols[i]:
             st.markdown(f"### {p_type}")
             
-            # 🛑 LEAKPROOF ISOLATION: Explicitly filter dataset BEFORE computing metrics
             snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
             hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
             
@@ -214,10 +302,8 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 st.caption("No data available.")
                 continue
 
-            # Compute current averages solely out of insulated snapshot arrays
             avg_val = snap_type_df['temperature'].mean()
             
-            # Compute high/low limits using only the values belonging to this category
             if not hist_type_df.empty:
                 high_val = hist_type_df['temperature'].max()
                 low_val = hist_type_df['temperature'].min()
@@ -225,7 +311,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
                 high_val = snap_type_df['temperature'].max()
                 low_val = snap_type_df['temperature'].min()
 
-            # Render Main Current Metric
             st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
             st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
@@ -235,13 +320,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    """
-    Engineering-grade Vertical Temperature Profiles matching your Dashboard.
-    - Empirical data only (no theoretical lines).
-    - Baseline: First Day Data snapshot (Black Dashed Line).
-    - Freezing Line: Light Blue (Hex #ADD8E6).
-    - Scale: Fixed -20 to 80.
-    """
+    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -252,6 +331,13 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
     
+    # Post-extraction sanity pass to keep out any test configurations that slipped through
+    depth_df = depth_df[
+        (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~depth_df['Location'].str.upper().str.contains('DESK')) &
+        (~depth_df['Location'].str.upper().str.contains('TEST'))
+    ]
+    
     if depth_df.empty:
         st.info("No sensors with valid 'Depth' values found in the Registry.")
         return
@@ -259,14 +345,14 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     freeze_pt = 32
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
-    locations = sorted(depth_df['Location'].unique())
+    locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. CALCULATE BASELINE ---
+            # --- A. BASELINE CALCULATIONS ---
             baseline_ts = loc_data['timestamp'].min()
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -291,7 +377,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                     hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
             
-            # --- B. PLOT WEEKLY SNAPSHOTS ---
+            # --- B. WEEKLY SNAPSHOT CALCULATIONS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
@@ -321,10 +407,8 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
-            # --- C. FREEZING REFERENCE LINE (Light Blue Hex ADD8E6) ---
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
 
-            # --- D. FIXED SCALING & FULL BOX FRAME ---
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
@@ -350,7 +434,7 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
-    proj_q = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.project_registry` WHERE Project LIKE '{TARGET_JOB_NUMBER}%'"
+    proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
     if proj_registry.empty:
@@ -377,8 +461,14 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # FAILSAFE APPLICATION DATA CLAMP
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
+
+    # Clean out any trailing office records that managed to bypass subqueries
+    full_p_df = full_p_df[
+        (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~full_p_df['Location'].str.upper().str.contains('DESK')) &
+        (~full_p_df['Location'].str.upper().str.contains('TEST'))
+    ]
 
     st.title(f"📊 {display_name}")
     
@@ -398,16 +488,42 @@ def render_client_portal():
 
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-        now_local_ts = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-        start_view = now_local_ts - timedelta(weeks=weeks_view)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                
+                matched_project_id = loc_data['Project'].iloc[0]
+                phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
+                
+                loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
+                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                loc_f_start_date = f_start_date
+                
+                if not phase_row.empty:
+                    raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
+                    if pd.notnull(raw_phase_fd):
+                        loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
+                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                        
+                        if weeks_view:
+                            loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                
+                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
+                graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
+                
                 st.plotly_chart(build_high_speed_graph(
-                    loc_data, f"{loc} History", start_view, now_local_ts, 
-                    "Fahrenheit", "°F", local_tz, f_start_date, f"{TARGET_JOB_NUMBER}-{loc}"
+                    loc_data, 
+                    f"{loc} History", 
+                    loc_start_view, 
+                    loc_last_data_ts + timedelta(hours=2), 
+                    "Fahrenheit", 
+                    "°F", 
+                    local_tz, 
+                    loc_f_start_date, 
+                    graph_curve_id
                 ), use_container_width=True)
 
     with tabs[2]:
@@ -417,6 +533,10 @@ def render_client_portal():
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
+        
+        latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
+        latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
+        
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
        
     with tabs[4]:
@@ -431,8 +551,6 @@ def render_client_portal():
             for path in possible_paths:
                 if os.path.exists(path):
                     try:
-                        # 🎯 THE SHIELD FIX: Read the asset as raw binary bytes 
-                        # This bypasses the buggy static Streamlit Cloud URL media compiler entirely
                         with open(path, "rb") as img_file:
                             img_bytes = img_file.read()
                         
@@ -441,7 +559,7 @@ def render_client_portal():
                         break
                     except Exception as img_err:
                         st.error(f"⚠️ Failed to decode image file stream: {img_err}")
-                        img_found = True # Stops loop since the file was found but corrupt
+                        img_found = True 
                         break
             if not img_found:
                 st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
