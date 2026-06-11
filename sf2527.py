@@ -146,7 +146,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Secondary cleaning filter step
+    # Filter out office layout remnants
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -154,9 +154,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     ]
 
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
+    
+    # 🎨 LOCK COLORS TO POSITION HERE
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Identify the latest node context checking in for each position to deduplicate legend display
+    # Track latest active nodes checking in per position for legend tracking strings
     latest_nodes_by_pos = {}
     for pos in unique_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos]
@@ -176,12 +178,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    # --- FIX HERE: Loop strictly by POSITION to merge separate log units together ---
+    # LOOP BY POSITION ONLY: This seamlessly bridges the hardware swap timelines together
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
         
-        # Display the position name along with the active node currently monitoring it
         active_node = latest_nodes_by_pos.get(pos, "Unknown")
         display_name = f"{pos} ({active_node})"
         
@@ -195,7 +196,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 gap_row = pos_df.loc[idx].copy()
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None breaks the connecting line trace segment
+                gap_row['temperature'] = None  
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -204,13 +205,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces explicit cuts at None row indices
-            # Locked color mapping based strictly on position index assignment
+            connectgaps=False,  
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-            # Dynamically reads changing NodeNums point-by-point along the continuous line
-            text=pos_df['NodeNum']
+            text=pos_df['NodeNum'] # Hover pop-up updates dynamically when node string shifts
         ))
         
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
@@ -237,7 +236,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
-
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
@@ -462,28 +460,26 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # --- FIXED: Extract clean, friendly location labels (e.g., 'T3', 'T5') ---
-        # If location contains raw node codes, fall back to PositionLabel to maintain grouping unity
+        # --- UNIFIED LOCATION GRAB PROTOCOL ---
         df_clean = full_p_df.copy()
         
         def get_clean_group_label(row):
             depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
             if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
                 return str(bank_val)
-            # If the database location cell is accidentally holding a raw channel name, use Bank/Depth instead
+            # If database cell contains a raw channel index string, map it to friendly 'T' format
             if 'CH' in str(loc_val).upper() or '-' in str(loc_val):
                 if pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0:
-                    return f"T{int(float(depth_val))}"  # Standardizes to T3 style mapping
+                    return f"T{int(float(depth_val))}"
                 return str(bank_val) if pd.notnull(bank_val) else str(loc_val)
             return str(loc_val)
 
         df_clean['GroupLocation'] = df_clean.apply(get_clean_group_label, axis=1)
         
-        # Pull distinct sorted engineering locations
+        # Pull distinct, cleanly sorted engineering borehole locations
         locations = sorted([str(l) for l in df_clean['GroupLocation'].dropna().unique()], key=natural_sort_key)
         
         for loc in locations:
-            # Group all telemetry historical logs matching this structural position under a single expander
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = df_clean[df_clean['GroupLocation'] == loc].copy()
                 
@@ -506,7 +502,6 @@ def render_client_portal():
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
-                # Render the high speed graph with unified positional data mapping
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -518,6 +513,7 @@ def render_client_portal():
                     loc_f_start_date, 
                     graph_curve_id
                 ), use_container_width=True)
+                
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
     
