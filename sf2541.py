@@ -85,7 +85,7 @@ def get_universal_portal_data(project_id):
               -- 🔒 EXCLUSION FILTER: Drop masked, bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
               
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
               AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
@@ -170,6 +170,13 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
+    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
+    plot_df = plot_df[
+        (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
+    ]
+
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
@@ -177,11 +184,14 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     latest_nodes_by_pos = {}
     for pos in unique_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos]
-        latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
-        latest_nodes_by_pos[pos] = latest_node
+        if not pos_df.empty:
+            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
+            latest_nodes_by_pos[pos] = latest_node
 
     def get_legend_sort_key(pos_str, df):
-        row = df[df['PositionLabel'] == pos_str].iloc[0]
+        sub_df = df[df['PositionLabel'] == pos_str]
+        if sub_df.empty: return (3, 0, pos_str)
+        row = sub_df.iloc[0]
         bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
         depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
         if 'R' in bank: return (0, bank, pos_str) 
@@ -192,26 +202,35 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
-        active_node = latest_nodes_by_pos[pos]
+        if pos_df.empty: continue
+        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
-        # Inserts a row containing a None value when the time distance between readings exceeds 24 hours.
-        # This causes Plotly to leave a visible break/gap in the line graph.
-        pos_df['time_delta'] = pos_df['timestamp'].diff()
-        gap_rows = pos_df[pos_df['time_delta'] > timedelta(hours=24)].copy()
+        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
+        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
+        pos_df = pos_df.sort_values('timestamp')
+        time_deltas = pos_df['timestamp'].diff()
+        gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
-        if not gap_rows.empty:
-            gap_rows['timestamp'] = gap_rows['timestamp'] - timedelta(seconds=1)
-            gap_rows['temperature'] = None
-            pos_df = pd.concat([pos_df, gap_rows]).sort_values('timestamp').reset_index(drop=True)
+        if not gap_indices.empty:
+            inserted_gaps = []
+            for idx in gap_indices:
+                gap_row = pos_df.loc[idx].copy()
+                # Place the gap timestamp exactly 1 second after the previous valid timestamp
+                prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
+                gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
+                gap_row['temperature'] = None  # None kills the connecting segment trace
+                inserted_gaps.append(gap_row)
+            
+            pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
         
         fig.add_trace(go.Scatter(
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces explicit line breaking at None values
+            connectgaps=False,  # Enforces physical segment termination at None rows
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
@@ -311,6 +330,13 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
+    
+    # Post-extraction sanity pass to keep out any test configurations that slipped through
+    depth_df = depth_df[
+        (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~depth_df['Location'].str.upper().str.contains('DESK')) &
+        (~depth_df['Location'].str.upper().str.contains('TEST'))
+    ]
     
     if depth_df.empty:
         st.info("No sensors with valid 'Depth' values found in the Registry.")
@@ -437,6 +463,13 @@ def render_client_portal():
 
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
+    # Clean out any trailing office records that managed to bypass subqueries
+    full_p_df = full_p_df[
+        (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
+        (~full_p_df['Location'].str.upper().str.contains('DESK')) &
+        (~full_p_df['Location'].str.upper().str.contains('TEST'))
+    ]
+
     st.title(f"📊 {display_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
@@ -456,7 +489,6 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # Enforce strict numerical alphanumeric sorting order on your trend expansions
         locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
@@ -502,7 +534,6 @@ def render_client_portal():
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
         
-        # Sort data frame rows naturally by Location before building table
         latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
         latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
         
@@ -513,6 +544,7 @@ def render_client_portal():
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
             possible_paths = [
                 os.path.join("assets", "asbuilts", asbuilt_filename), 
+                asbuilt_filename, 
                 os.path.join("assets", asbuilt_filename)
             ]
             img_found = False
