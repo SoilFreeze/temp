@@ -462,10 +462,30 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
+        # --- FIXED: Extract clean, friendly location labels (e.g., 'T3', 'T5') ---
+        # If location contains raw node codes, fall back to PositionLabel to maintain grouping unity
+        df_clean = full_p_df.copy()
+        
+        def get_clean_group_label(row):
+            depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
+            if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+                return str(bank_val)
+            # If the database location cell is accidentally holding a raw channel name, use Bank/Depth instead
+            if 'CH' in str(loc_val).upper() or '-' in str(loc_val):
+                if pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0:
+                    return f"T{int(float(depth_val))}"  # Standardizes to T3 style mapping
+                return str(bank_val) if pd.notnull(bank_val) else str(loc_val)
+            return str(loc_val)
+
+        df_clean['GroupLocation'] = df_clean.apply(get_clean_group_label, axis=1)
+        
+        # Pull distinct sorted engineering locations
+        locations = sorted([str(l) for l in df_clean['GroupLocation'].dropna().unique()], key=natural_sort_key)
+        
         for loc in locations:
+            # Group all telemetry historical logs matching this structural position under a single expander
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
-                loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                loc_data = df_clean[df_clean['GroupLocation'] == loc].copy()
                 
                 matched_project_id = loc_data['Project'].iloc[0]
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
@@ -486,6 +506,7 @@ def render_client_portal():
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
+                # Render the high speed graph with unified positional data mapping
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -497,7 +518,6 @@ def render_client_portal():
                     loc_f_start_date, 
                     graph_curve_id
                 ), use_container_width=True)
-
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
     
