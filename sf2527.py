@@ -129,7 +129,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
-    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if curve_id and f_start_date:
@@ -170,7 +169,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
+    # Secondary cleaning filter step
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -178,16 +177,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     ]
 
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
+    
+    # 🎨 COLOR FIX: Map locked colors to positions, completely independent of changing NodeNums
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Identify the latest node context checking in for each position to deduplicate legend display
-    latest_nodes_by_pos = {}
-    for pos in unique_positions:
-        pos_df = plot_df[plot_df['PositionLabel'] == pos]
-        if not pos_df.empty:
-            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
-            latest_nodes_by_pos[pos] = latest_node
-
+    # Determine sorting layout logic for the side legend tracking panel
     def get_legend_sort_key(pos_str, df):
         sub_df = df[df['PositionLabel'] == pos_str]
         if sub_df.empty: return (3, 0, pos_str)
@@ -200,17 +194,16 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
+    # 🔗 MOUNT ENGINE: Loops over positions, completely bridging split historical serial logs
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
-        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
+        # Pull the absolute newest streaming node context assigned to this specific hole for display purposes
+        active_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
-        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
-        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
-        pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
@@ -218,10 +211,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             inserted_gaps = []
             for idx in gap_indices:
                 gap_row = pos_df.loc[idx].copy()
-                # Place the gap timestamp exactly 1 second after the previous valid timestamp
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None kills the connecting segment trace
+                gap_row['temperature'] = None  # None turns off connecting segment traces
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -230,10 +222,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
+            connectgaps=False,  # Enforces clear break lines across outaged timeline slots
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+            # Dynamically tracks changing NodeNums point-by-point inside the unified line text frame
             text=pos_df['NodeNum']
         ))
         
@@ -265,7 +258,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
@@ -320,7 +312,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -331,7 +322,6 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
     
-    # Post-extraction sanity pass to keep out any test configurations that slipped through
     depth_df = depth_df[
         (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
         (~depth_df['Location'].str.upper().str.contains('DESK')) &
@@ -463,7 +453,6 @@ def render_client_portal():
 
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
-    # Clean out any trailing office records that managed to bypass subqueries
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
@@ -510,7 +499,6 @@ def render_client_portal():
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
