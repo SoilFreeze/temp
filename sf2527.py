@@ -50,46 +50,69 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
-    Fetches ALL historical and streaming telemetry explicitly assigned to a project.
-    Bypasses registry timeline window constraints to capture pre-freeze/backfilled chunks,
-    while strictly filtering out unapproved records, baddata, masked data, and office loops.
+    Fetches approved client telemetry, surgically bound between the deployment's 
+    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
+    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     query = f"""
+        WITH filtered_base AS (
+            SELECT 
+                m.Project, 
+                m.NodeNum, 
+                n.Bank, 
+                n.Location, 
+                n.Depth, 
+                m.temperature, 
+                m.timestamp, 
+                m.approval_status,
+                n.Start_Date,
+                n.End_Date
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+            JOIN `{PROJECT_REGISTRY_TABLE}` p 
+              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
+            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
+              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+              
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
+              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
+              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
+              
+              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
+              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
+              
+              AND n.SensorStatus IN ('On Project', 'Available')
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+        ),
+        gap_evaluation AS (
+            SELECT 
+                *,
+                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
+            FROM filtered_base
+        )
         SELECT 
-            m.Project, 
-            m.NodeNum, 
-            n.Bank, 
-            n.Location, 
-            n.Depth, 
-            m.temperature, 
-            m.timestamp, 
-            m.approval_status
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-        -- Soft-link against the asset registry to pull down location tracking names
-        LEFT JOIN `{NODE_REGISTRY_TABLE}` n 
-          ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-        WHERE (CAST(m.Project AS STRING) = CAST(@project_id AS STRING) OR CAST(n.Project AS STRING) = CAST(@project_id AS STRING))
-          
-          -- 🔒 MANDATORY GLOBAL FILTERS (Only drops explicitly rejected or unapproved rows)
-          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
-          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) != 'PENDING'  -- Forces only approved data
-          
-          -- 🚫 ABSOLUTE OFFICE / DEK EXCLUSION RULES
-          AND UPPER(TRIM(CAST(COALESCE(n.Project, '') AS STRING))) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%DESK%'
-          AND UPPER(TRIM(CAST(COALESCE(n.Location, m.Location, '') AS STRING))) NOT LIKE '%TEST%'
-          
-          -- Temperature Boundary Guard
-          AND m.temperature >= -30.0 AND m.temperature <= 120.0
-        ORDER BY m.timestamp ASC
+            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+        FROM gap_evaluation
+        WHERE prev_timestamp IS NULL 
+           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
+        ORDER BY timestamp ASC
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
     return client.query(query, job_config=job_config).to_dataframe()
-    
+
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
@@ -106,6 +129,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
     final_end_view, final_start_view = end_view, start_view
+    proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
     if curve_id and f_start_date:
@@ -146,7 +170,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Filter out office layout remnants
+    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -154,11 +178,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     ]
 
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
-    
-    # 🎨 LOCK COLORS TO POSITION HERE
     position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
-    # Track latest active nodes checking in per position for legend tracking strings
+    # Identify the latest node context checking in for each position to deduplicate legend display
     latest_nodes_by_pos = {}
     for pos in unique_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos]
@@ -178,15 +200,17 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
 
-    # LOOP BY POSITION ONLY: This seamlessly bridges the hardware swap timelines together
     for pos in sorted_positions:
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
-        
         active_node = latest_nodes_by_pos.get(pos, "Unknown")
+        
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
+        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
+        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
+        pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
         
@@ -194,9 +218,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             inserted_gaps = []
             for idx in gap_indices:
                 gap_row = pos_df.loc[idx].copy()
+                # Place the gap timestamp exactly 1 second after the previous valid timestamp
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  
+                gap_row['temperature'] = None  # None kills the connecting segment trace
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -205,11 +230,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  
+            connectgaps=False,  # Enforces physical segment termination at None rows
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-            text=pos_df['NodeNum'] # Hover pop-up updates dynamically when node string shifts
+            text=pos_df['NodeNum']
         ))
         
     fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
@@ -236,9 +261,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
+
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
+    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
@@ -293,6 +320,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
+    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -303,6 +331,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
     
+    # Post-extraction sanity pass to keep out any test configurations that slipped through
     depth_df = depth_df[
         (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
         (~depth_df['Location'].str.upper().str.contains('DESK')) &
@@ -434,10 +463,10 @@ def render_client_portal():
 
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
+    # Clean out any trailing office records that managed to bypass subqueries
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
-        --------------
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
@@ -460,28 +489,10 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # --- UNIFIED LOCATION GRAB PROTOCOL ---
-        df_clean = full_p_df.copy()
-        
-        def get_clean_group_label(row):
-            depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
-            if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-                return str(bank_val)
-            # If database cell contains a raw channel index string, map it to friendly 'T' format
-            if 'CH' in str(loc_val).upper() or '-' in str(loc_val):
-                if pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0:
-                    return f"T{int(float(depth_val))}"
-                return str(bank_val) if pd.notnull(bank_val) else str(loc_val)
-            return str(loc_val)
-
-        df_clean['GroupLocation'] = df_clean.apply(get_clean_group_label, axis=1)
-        
-        # Pull distinct, cleanly sorted engineering borehole locations
-        locations = sorted([str(l) for l in df_clean['GroupLocation'].dropna().unique()], key=natural_sort_key)
-        
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
-                loc_data = df_clean[df_clean['GroupLocation'] == loc].copy()
+                loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
                 matched_project_id = loc_data['Project'].iloc[0]
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
@@ -499,6 +510,7 @@ def render_client_portal():
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
+                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
@@ -513,7 +525,7 @@ def render_client_portal():
                     loc_f_start_date, 
                     graph_curve_id
                 ), use_container_width=True)
-                
+
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
     
