@@ -43,6 +43,10 @@ def ensure_tz_convert(series, target_tz):
         return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
     return series.dt.tz_convert(target_tz)
 
+def natural_sort_key(s):
+    """Splits text and numbers to allow natural sorting (e.g., T1, T2, T3 instead of T1, T10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
 @st.cache_data(ttl=600)
 def get_universal_portal_data(project_id):
     """
@@ -255,7 +259,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     freeze_pt = 32
     now_utc = pd.Timestamp.now(tz='UTC')
     mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
-    locations = sorted(depth_df['Location'].unique())
+    locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
         with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
@@ -392,17 +396,15 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()])
+        # Enforce strict numerical alphanumeric sorting order on your trend expansions
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
-                # --- PHASE-SPECIFIC WINDOW ALIGNMENT FIXED RULES ---
-                # 1. Look up the specific phase project code for this location grouping
                 matched_project_id = loc_data['Project'].iloc[0]
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
-                # Default boundary fallbacks
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 loc_f_start_date = f_start_date
@@ -411,12 +413,14 @@ def render_client_portal():
                     raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
-                        # Override start window to sit exactly on the phase start date
                         loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
                         
-                        # If a specific history timeline weeks span is requested, pivot backwards from the phase's latest timestamp
                         if weeks_view:
                             loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                
+                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
+                graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
@@ -427,7 +431,7 @@ def render_client_portal():
                     "°F", 
                     local_tz, 
                     loc_f_start_date, 
-                    f"{TARGET_JOB_NUMBER}-{loc}"
+                    graph_curve_id
                 ), use_container_width=True)
 
     with tabs[2]:
@@ -437,6 +441,11 @@ def render_client_portal():
         latest = full_p_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         latest['timestamp'] = ensure_tz_convert(latest['timestamp'], local_tz)
         latest['Position'] = latest.apply(lambda r: f"{r['Depth']} ft" if pd.notnull(r.get('Depth')) else f"Bank {r['Bank']}", axis=1)
+        
+        # Sort data frame rows naturally by Location before building table
+        latest['sort_idx'] = latest['Location'].apply(natural_sort_key)
+        latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
+        
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
        
     with tabs[4]:
