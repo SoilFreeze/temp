@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 TARGET_JOB_NUMBER = "2538" 
 # ===============================================================
 
+
 st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
