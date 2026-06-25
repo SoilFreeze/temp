@@ -155,6 +155,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
+                    
+                    # DEBUG: See what the first point of your curve is
+                    st.write(f"DEBUG: Curve {cid} starts on {c_df['timestamp'].min()}")
+                    
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
