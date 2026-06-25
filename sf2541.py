@@ -141,13 +141,16 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            # Use exact match for CurveID to prevent T1 matching T10, T11, etc.
+            # Use LIKE with a trailing wildcard to match the specific T-number
+            # while allowing for the extra descriptive text (e.g., '-Sat Silt')
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE CurveID = '{curve_id}'
+                WHERE CurveID LIKE '{curve_id}%'
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
+            
+            # (Keep the rest of your logic here)
             
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
