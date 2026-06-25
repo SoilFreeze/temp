@@ -132,15 +132,11 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # --- INSERT DEBUG BLOCK HERE ---
+    # --- UPDATED DEBUG BLOCK ---
     st.write(f"DEBUG: Searching for exact CurveID: '{curve_id}'")
-
-    # Optional: If you want to see what IS in the table to compare
-    if st.checkbox("Show Table Contents"):
+    if st.checkbox("Show Table Contents", key=f"debug_chk_{title}"):
         debug_q = f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` LIMIT 20"
         st.dataframe(client.query(debug_q).to_dataframe())
-    # -------------------------------                           
-
                                
     if curve_id and f_start_date:
         try:
