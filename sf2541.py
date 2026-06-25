@@ -116,7 +116,7 @@ def get_universal_portal_data(project_id):
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", project_name="Project", f_start_date=None, curve_id=None):
+                           display_tz="UTC", f_start_date=None, curve_id=None):
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -128,7 +128,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     freeze_pt = 0 if unit_mode == "Celsius" else 32
     y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
 
-    # --- 1. REFERENCE CURVES ---
+    final_end_view, final_start_view = end_view, start_view
+    proj_num = TARGET_JOB_NUMBER
+    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
+
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
@@ -154,46 +157,112 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                     ))
         except Exception as e: 
             st.error(f"Error loading theoretical curves: {e}")
-    # --- 2. SENSOR DATA SORTING ---
-    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+            
+    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
-    def get_sort_data(row):
-        bank, depth, loc = str(row['Bank']), str(row['Depth']), str(row['Location']).upper()
-        if 'AMBIENT' in loc or 'OFFICE' in loc or 'X-TRA' in loc or 'TEST' in loc: return None
-        # Priority 0: Banks, Priority 1: Temp Pipes
-        if bank and bank not in ['nan', '—', '-']: return (0, natural_sort_key(bank), f"Brine: {bank} ({row['NodeNum']})")
-        if depth and depth not in ['nan', '—', '-']: return (1, natural_sort_key(depth), f"{depth}ft ({row['NodeNum']})")
-        return None
+    def get_position_string(row):
+        depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
+        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
+            return str(bank_val)
+        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: 
+            return f"{depth_val}ft"
+        else: 
+            return str(loc_val)
 
-    plot_df['SortData'] = plot_df.apply(get_sort_data, axis=1)
-    plot_df = plot_df.dropna(subset=['SortData'])
-    
-    # Sort and plot
-    sorted_positions = sorted(plot_df['SortData'].unique(), key=lambda x: (x[0], x[1]))
+    plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    for i, sort_tuple in enumerate(sorted_positions):
-        _, _, display_name = sort_tuple
-        s_df = plot_df[plot_df['SortData'] == sort_tuple].sort_values('timestamp')
-        s_df = s_df.set_index('timestamp').resample('1h').first().reset_index()
+    # Secondary cleaning filter step to make sure no loose office/desk items survive in telemetry subsets
+    plot_df = plot_df[
+        (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
+        (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
+    ]
+
+    unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
+    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
+
+    # Identify the latest node context checking in for each position to deduplicate legend display
+    latest_nodes_by_pos = {}
+    for pos in unique_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos]
+        if not pos_df.empty:
+            latest_node = pos_df.sort_values('timestamp').iloc[-1]['NodeNum']
+            latest_nodes_by_pos[pos] = latest_node
+
+    def get_legend_sort_key(pos_str, df):
+        sub_df = df[df['PositionLabel'] == pos_str]
+        if sub_df.empty: return (3, 0, pos_str)
+        row = sub_df.iloc[0]
+        bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
+        depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
+        if 'R' in bank: return (0, bank, pos_str) 
+        if 'S' in bank: return (1, bank, pos_str)
+        return (2, depth, pos_str)
+
+    sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
+
+    for pos in sorted_positions:
+        pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
+        if pos_df.empty: continue
+        active_node = latest_nodes_by_pos.get(pos, "Unknown")
         
-        fig.add_trace(go.Scatter(x=s_df['timestamp'], y=s_df['temperature'], name=display_name, mode='lines',
-            line=dict(width=2, color=sf_15_palette[i % 10]), connectgaps=False))
-
-    # --- 3. LAYOUT & FOOTERS ---
-    header_text = f"Temperatures for Temperature Pipe {title}" if any(x in title.upper() for x in ['T', 'TP']) else f"Temperatures for Brine Bank {title}"
+        display_name = f"{pos} ({active_node})"
+        
+        # ⏱️ 24-HOUR CHART GAP BUILDER
+        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
+        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
+        pos_df = pos_df.sort_values('timestamp')
+        time_deltas = pos_df['timestamp'].diff()
+        gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
+        
+        if not gap_indices.empty:
+            inserted_gaps = []
+            for idx in gap_indices:
+                gap_row = pos_df.loc[idx].copy()
+                # Place the gap timestamp exactly 1 second after the previous valid timestamp
+                prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
+                gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
+                gap_row['temperature'] = None  # None kills the connecting segment trace
+                inserted_gaps.append(gap_row)
+            
+            pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
+        
+        fig.add_trace(go.Scatter(
+            x=pos_df['timestamp'], y=pos_df['temperature'], 
+            name=display_name, 
+            mode='lines',
+            connectgaps=False,  # Enforces physical segment termination at None rows
+            line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+            showlegend=True,
+            hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
+            text=pos_df['NodeNum']
+        ))
+        
+    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
+    now_ts = pd.Timestamp.now(tz=display_tz)
+    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
     
+    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
+    for m_dt in m_range:
+        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
+
     fig.update_layout(
-        title=dict(text=f"<b>{header_text}</b>", x=0.5, xanchor='center', y=0.96, font=dict(size=19)),
-        margin=dict(l=60, r=40, t=80, b=120),
-        annotations=[
-            dict(x=0.02, y=-0.14, xref='paper', yref='paper', text=f"<b>Project:</b> {project_name}", showarrow=False, xanchor='left', font=dict(size=13, color="#666")),
-            dict(x=0.98, y=-0.14, xref='paper', yref='paper', text=f"<b>Type:</b> Time vs Temperature", showarrow=False, xanchor='right', font=dict(size=13, color="#666"))
-        ],
-        xaxis=dict(range=[start_view, end_view], showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, tickformat='%b %d'),
-        yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2),
+        title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
+        plot_bgcolor='white', hovermode="x unified", height=650,
+        xaxis=dict(
+            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
+            showline=True, mirror=True, linecolor='black', linewidth=2,
+            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), tickformat='%b %d'
+        ),
+        yaxis=dict(
+            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
+            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
+        ),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
     )
     return fig
+
 
 # --- UI TABS ---
 
