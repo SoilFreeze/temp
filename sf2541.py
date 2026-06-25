@@ -49,12 +49,43 @@ def natural_sort_key(s):
 @st.cache_data(ttl=600)
 def get_universal_portal_data(selected_phase_name):
     """
-    Fetches client telemetry directly from the v2 master view, utilizing native 
-    Phase and System columns to isolate data.
+    Fetches client telemetry directly from the v2 master view, using Python Regex 
+    to create an indestructible, space-agnostic phase matching query.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
+    # ---------------------------------------------------------
+    # SMART PHASE DETECTION
+    # ---------------------------------------------------------
+    # Check if the selected tab contains a Phase number (e.g. extracts "2" from "Phase2")
+    phase_match = re.search(r'Phase\s*(\d+)', selected_phase_name, re.IGNORECASE)
+    
+    if phase_match:
+        p_num = phase_match.group(1)
+        # It IS a specific phase (e.g. Phase 2). Search for '2541' AND the digit '2'
+        sql_phase_filter = f"""
+            UPPER(CAST(m.Project AS STRING)) LIKE '%{TARGET_JOB_NUMBER}%'
+            AND (
+                UPPER(REPLACE(CAST(m.Phase AS STRING), ' ', '')) LIKE '%PHASE{p_num}%' OR 
+                CAST(m.Phase AS STRING) = '{p_num}' OR
+                UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) LIKE '%PHASE{p_num}%'
+            )
+        """
+    else:
+        # It's the Base Project. Search for '2541' but explicitly EXCLUDE Phase 2, 3, etc.
+        sql_phase_filter = f"""
+            UPPER(CAST(m.Project AS STRING)) LIKE '%{TARGET_JOB_NUMBER}%'
+            AND (
+                m.Phase IS NULL OR 
+                m.Phase = '' OR
+                m.Phase = '1' OR
+                (UPPER(CAST(m.Phase AS STRING)) NOT LIKE '%PHASE%' AND CAST(m.Phase AS STRING) NOT IN ('2', '3', '4', '5'))
+            )
+            AND UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) NOT LIKE '%PHASE2%'
+            AND UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) NOT LIKE '%PHASE3%'
+        """
+
     query = f"""
         WITH filtered_base AS (
             SELECT 
@@ -69,11 +100,7 @@ def get_universal_portal_data(selected_phase_name):
                 m.timestamp
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             WHERE 
-              (
-                  UPPER(TRIM(CAST(m.Project AS STRING))) = UPPER(TRIM(@phase_name)) OR
-                  UPPER(TRIM(CAST(m.Phase AS STRING))) = UPPER(TRIM(@phase_name)) OR
-                  UPPER(CONCAT(TRIM(CAST(m.Project AS STRING)), ' ', TRIM(CAST(m.Phase AS STRING)))) = UPPER(TRIM(@phase_name))
-              )
+              ({sql_phase_filter})
               AND m.temperature >= -30.0 AND m.temperature <= 120.0
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
@@ -93,10 +120,7 @@ def get_universal_portal_data(selected_phase_name):
         ORDER BY timestamp ASC
     """
     
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("phase_name", "STRING", selected_phase_name)]
-    )
-    return client.query(query, job_config=job_config).to_dataframe()
+    return client.query(query).to_dataframe()
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
