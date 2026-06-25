@@ -21,7 +21,6 @@ DATASET_ID = "Temperature"
 
 # Migration Targets for Google Sheets / Native Table Migration Phase
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
-NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
 
 # --- CORE UTILITIES ---
 
@@ -48,11 +47,10 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(project_id):
+def get_universal_portal_data(selected_phase_name):
     """
-    Fetches approved client telemetry, surgically bound between the deployment's 
-    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
-    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
+    Fetches client telemetry directly from the v2 master view, utilizing native 
+    Phase and System columns to isolate data.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -61,41 +59,25 @@ def get_universal_portal_data(project_id):
         WITH filtered_base AS (
             SELECT 
                 m.Project, 
+                m.Phase,
+                m.System,
                 m.NodeNum, 
-                n.Bank, 
-                n.Location, 
-                n.Depth, 
+                m.Bank, 
+                m.Location, 
+                m.Depth, 
                 m.temperature, 
-                m.timestamp, 
-                m.approval_status,
-                n.Start_Date,
-                n.End_Date
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
-            JOIN `{NODE_REGISTRY_TABLE}` n 
-              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-            JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
-            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
-              
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
-              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
-              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
-              
-              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
-              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
-              
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
-              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
+                m.timestamp
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
+            WHERE 
+              (
+                  UPPER(TRIM(CAST(m.Project AS STRING))) = UPPER(TRIM(@phase_name)) OR
+                  UPPER(TRIM(CAST(m.Phase AS STRING))) = UPPER(TRIM(@phase_name)) OR
+                  UPPER(CONCAT(TRIM(CAST(m.Project AS STRING)), ' ', TRIM(CAST(m.Phase AS STRING)))) = UPPER(TRIM(@phase_name))
+              )
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
-              
-              AND n.SensorStatus IN ('On Project', 'Available')
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         gap_evaluation AS (
             SELECT 
@@ -104,13 +86,16 @@ def get_universal_portal_data(project_id):
             FROM filtered_base
         )
         SELECT 
-            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
+            *
         FROM gap_evaluation
         WHERE prev_timestamp IS NULL 
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
         ORDER BY timestamp ASC
     """
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("phase_name", "STRING", selected_phase_name)]
+    )
     return client.query(query, job_config=job_config).to_dataframe()
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
@@ -132,12 +117,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     proj_num = TARGET_JOB_NUMBER
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # --- UPDATED DEBUG BLOCK ---
-    st.write(f"DEBUG: Searching for exact CurveID: '{curve_id}'")
-    if st.checkbox("Show Table Contents", key=f"debug_chk_{title}"):
-        debug_q = f"SELECT DISTINCT CurveID FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` LIMIT 20"
-        st.dataframe(client.query(debug_q).to_dataframe())
-                               
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
@@ -150,15 +129,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             """
             target_df = client.query(target_q).to_dataframe()
             
-            # (Keep the rest of your logic here)
-            
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                    
-                    # DEBUG: See what the first point of your curve is
-                    st.write(f"DEBUG: Curve {cid} starts on {c_df['timestamp'].min()}")
-                    
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
                     soil_label = str(cid).split('-')[-1].strip()
@@ -169,7 +142,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                         legendrank=1 
                     ))
         except Exception as e: 
-            st.error(f"Error loading theoretical curves: {e}")
+            pass # Fail silently in production
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
@@ -222,8 +195,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
-        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
-        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
         pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
@@ -232,10 +203,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             inserted_gaps = []
             for idx in gap_indices:
                 gap_row = pos_df.loc[idx].copy()
-                # Place the gap timestamp exactly 1 second after the previous valid timestamp
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  # None kills the connecting segment trace
+                gap_row['temperature'] = None  
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -244,7 +214,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
+            connectgaps=False,  
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
@@ -276,11 +246,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     )
     return fig
 
-
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
@@ -335,7 +303,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -346,7 +313,6 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
     
-    # Post-extraction sanity pass to keep out any test configurations that slipped through
     depth_df = depth_df[
         (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
         (~depth_df['Location'].str.upper().str.contains('DESK')) &
@@ -459,11 +425,9 @@ def render_client_portal():
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
-    # Sort to ensure Phase 1, Phase 2, etc. appear in logical order
     proj_registry = proj_registry.sort_values('Project').reset_index(drop=True)
     phase_list = proj_registry['Project'].tolist()
     
-    # Render Master Tabs (Radio Selector)
     if len(phase_list) > 1:
         st.markdown("### 🏗️ Select Project Phase")
         selected_phase = st.radio("Phase Selection", options=phase_list, horizontal=True, label_visibility="collapsed")
@@ -492,17 +456,14 @@ def render_client_portal():
     # 3. FETCH AND CLEAN DATA (STRICTLY FOR ACTIVE PHASE)
     # =========================================================
     with st.spinner(f"Synchronizing official records for {selected_phase}..."):
-        # We now only query the database for the active phase
         full_p_df = get_universal_portal_data(selected_phase)
 
     if full_p_df.empty:
         st.warning(f"⚠️ No approved data records available yet for {selected_phase}.")
         return
 
-    # Range limits
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
-    # Clean out trailing office records
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
@@ -542,9 +503,9 @@ def render_client_portal():
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                # Exclusion protocol for brine manifolds
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
-                graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
+                # Curve ID constructed strictly using TARGET_JOB_NUMBER to ensure it finds '2541-T18%' in DB
+                graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
@@ -554,7 +515,7 @@ def render_client_portal():
                     "Fahrenheit", 
                     "°F", 
                     local_tz, 
-                    f_start_date,  # This date is now perfectly locked to the active phase
+                    f_start_date, 
                     graph_curve_id
                 ), use_container_width=True)
 
