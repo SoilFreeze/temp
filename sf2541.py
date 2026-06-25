@@ -148,7 +148,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             # while allowing for the extra descriptive text (e.g., '-Sat Silt')
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE CurveID LIKE '{curve_id}%'
+                WHERE REGEXP_CONTAINS(CurveID, r'^{curve_id}([^0-9]|$)')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
