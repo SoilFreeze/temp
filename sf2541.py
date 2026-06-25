@@ -132,23 +132,28 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            # Strict boundary matching to avoid T1 matching T11
+            # Use exact match for CurveID to prevent T1 matching T10, T11, etc.
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
-                AND REGEXP_CONTAINS(UPPER(CurveID), r'\\b{re.escape(str(curve_id).split('-')[-1].upper())}\\b')
+                WHERE CurveID = '{curve_id}'
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
+            
             if not target_df.empty:
                 for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
                     c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
                     c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
                     ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    fig.add_trace(go.Scatter(x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {cid.split('-')[-1]}</b>", mode='lines',
-                        line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)]), legendrank=1))
-        except: pass
-
+                    soil_label = str(cid).split('-')[-1].strip()
+                    
+                    fig.add_trace(go.Scatter(
+                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
+                        line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
+                        legendrank=1 
+                    ))
+        except Exception as e: 
+            st.error(f"Error loading theoretical curves: {e}")
     # --- 2. SENSOR DATA SORTING ---
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
     
