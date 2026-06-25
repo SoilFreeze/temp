@@ -449,6 +449,9 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
+    # =========================================================
+    # 1. FETCH REGISTRY & CREATE MASTER PHASE SELECTOR
+    # =========================================================
     proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -456,38 +459,59 @@ def render_client_portal():
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
-    primary_meta = proj_registry.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
-    local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    # Sort to ensure Phase 1, Phase 2, etc. appear in logical order
+    proj_registry = proj_registry.sort_values('Project').reset_index(drop=True)
+    phase_list = proj_registry['Project'].tolist()
     
-    proj_registry['temp_sort_date'] = pd.to_datetime(proj_registry['Date_Freezedown'], errors='coerce')
-    proj_registry = proj_registry.sort_values('temp_sort_date', ascending=False).reset_index(drop=True)
+    # Render Master Tabs (Radio Selector)
+    if len(phase_list) > 1:
+        st.markdown("### 🏗️ Select Project Phase")
+        selected_phase = st.radio("Phase Selection", options=phase_list, horizontal=True, label_visibility="collapsed")
+    else:
+        selected_phase = phase_list[0]
+        
+    st.divider()
+
+    # =========================================================
+    # 2. LOCK METADATA TO THE SELECTED PHASE
+    # =========================================================
+    primary_meta = proj_registry[proj_registry['Project'] == selected_phase].iloc[0].to_dict()
+    display_name = primary_meta.get('ProjectName', selected_phase)
+    local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     f_start_date = None
     day_count_text = ""
+    
     if pd.notnull(primary_meta.get('Date_Freezedown')):
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
-    with st.spinner("Synchronizing official records..."):
-        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
-        full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
+    # =========================================================
+    # 3. FETCH AND CLEAN DATA (STRICTLY FOR ACTIVE PHASE)
+    # =========================================================
+    with st.spinner(f"Synchronizing official records for {selected_phase}..."):
+        # We now only query the database for the active phase
+        full_p_df = get_universal_portal_data(selected_phase)
 
     if full_p_df.empty:
-        st.warning("⚠️ No approved data records available yet.")
+        st.warning(f"⚠️ No approved data records available yet for {selected_phase}.")
         return
 
+    # Range limits
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
-    # Clean out any trailing office records that managed to bypass subqueries
+    # Clean out trailing office records
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
+    # =========================================================
+    # 4. RENDER UI HEADER
+    # =========================================================
     st.title(f"📊 {display_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
@@ -499,6 +523,9 @@ def render_client_portal():
     with head_c2:
         if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
 
+    # =========================================================
+    # 5. RENDER DASHBOARD TABS
+    # =========================================================
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
@@ -512,37 +539,12 @@ def render_client_portal():
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
-                # 1. Sort chronologically to GUARANTEE we get the active phase
-                loc_data = loc_data.sort_values('timestamp')
-                
-                # 2. Now extract the true latest project ID
-                matched_project_id = loc_data['Project'].iloc[-1]
-                
-                # 3. Get the correct registry row
-                phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
-                
-                raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
-                phase_start_date = pd.to_datetime(raw_phase_fd).date() if pd.notnull(raw_phase_fd) else f_start_date
-                
-                # --- VISUAL DEBUGGER (Remove once working) ---
-                st.caption(f"🔧 Target Phase: {matched_project_id} | Curve Anchor Date: {phase_start_date}")
-                # ----------------------------------------------
-                
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
-                loc_start_view = pd.Timestamp(phase_start_date).tz_localize(local_tz)
+                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                if not phase_row.empty:
-                    raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
-                    if pd.notnull(raw_phase_fd):
-                        loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
-                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
-                        
-                        if weeks_view:
-                            loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
-                
-                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
+                # Exclusion protocol for brine manifolds
                 is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
-                graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
+                graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
                 
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
@@ -552,7 +554,7 @@ def render_client_portal():
                     "Fahrenheit", 
                     "°F", 
                     local_tz, 
-                    phase_start_date, # Passes the corrected date
+                    f_start_date,  # This date is now perfectly locked to the active phase
                     graph_curve_id
                 ), use_container_width=True)
 
@@ -568,7 +570,7 @@ def render_client_portal():
         latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
         
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
-       
+        
     with tabs[4]:
         asbuilt_filename = primary_meta.get('AsBuiltFile')
         if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
