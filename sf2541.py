@@ -188,8 +188,14 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
     ]
 
+    # Update the color map logic to give Ambient a permanent distinct color
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
-    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
+    position_color_map = {}
+    for idx, pos in enumerate(unique_positions):
+        if any(x in str(pos).upper() for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE']):
+            position_color_map[pos] = 'rgba(100, 100, 100, 0.8)' # Distinct dark grey
+        else:
+            position_color_map[pos] = sf_15_palette[idx % len(sf_15_palette)]
 
     # Identify the latest node context checking in for each position to deduplicate legend display
     latest_nodes_by_pos = {}
@@ -519,16 +525,34 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
+        # --- AMBIENT ROUTING LOGIC ---
+        ambient_keywords = ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']
+        
+        # 1. Isolate Ambient Data into its own dataframe
+        ambient_mask = full_p_df['Location'].str.upper().apply(
+            lambda x: any(k in x for k in ambient_keywords) if pd.notnull(x) else False
+        )
+        ambient_df = full_p_df[ambient_mask].copy()
+        
+        # 2. Get standard locations, explicitly filtering OUT ambient so it doesn't get its own tab
+        locations = sorted([
+            str(loc) for loc in full_p_df['Location'].dropna().unique() 
+            if not any(k in str(loc).upper() for k in ambient_keywords)
+        ], key=natural_sort_key)
+        
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
+                
+                # 3. INJECT AMBIENT DATA: If this is a brine pipe, append the ambient data
+                if is_brine_pipe and not ambient_df.empty:
+                    loc_data = pd.concat([loc_data, ambient_df])
+                
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
-                # Curve ID constructed strictly using TARGET_JOB_NUMBER to ensure it finds '2541-T18%' in DB
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
                 st.plotly_chart(build_high_speed_graph(
