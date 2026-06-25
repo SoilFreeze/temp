@@ -508,16 +508,23 @@ def render_client_portal():
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
+                
+                # 1. Sort chronologically to GUARANTEE we get the active phase
+                loc_data = loc_data.sort_values('timestamp')
+                
+                # 2. Now extract the true latest project ID
                 matched_project_id = loc_data['Project'].iloc[-1]
                 
-                # Get the registry row specifically for this phase
+                # 3. Get the correct registry row
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
-                # Extract the start date for THIS specific phase
                 raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
                 phase_start_date = pd.to_datetime(raw_phase_fd).date() if pd.notnull(raw_phase_fd) else f_start_date
                 
-                # Calculate the view window based on this phase's start
+                # --- VISUAL DEBUGGER (Remove once working) ---
+                st.caption(f"🔧 Target Phase: {matched_project_id} | Curve Anchor Date: {phase_start_date}")
+                # ----------------------------------------------
+                
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = pd.Timestamp(phase_start_date).tz_localize(local_tz)
                 
@@ -542,7 +549,7 @@ def render_client_portal():
                     "Fahrenheit", 
                     "°F", 
                     local_tz, 
-                    phase_start_date, # Pass the phase-specific date here!
+                    phase_start_date, # Passes the corrected date
                     graph_curve_id
                 ), use_container_width=True)
 
