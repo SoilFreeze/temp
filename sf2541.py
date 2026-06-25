@@ -508,7 +508,7 @@ def render_client_portal():
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-                matched_project_id = loc_data['Project'].iloc[0]
+                matched_project_id = loc_data['Project'].iloc[-1]
                 
                 # Get the registry row specifically for this phase
                 phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
