@@ -460,6 +460,9 @@ def render_client_portal():
     display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
+    proj_registry['temp_sort_date'] = pd.to_datetime(proj_registry['Date_Freezedown'], errors='coerce')
+    proj_registry = proj_registry.sort_values('temp_sort_date', ascending=False).reset_index(drop=True)
+    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     f_start_date = None
     day_count_text = ""
