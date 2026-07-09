@@ -8,14 +8,38 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 
 # ===============================================================
-# 1. TARGET CONFIGURATION
-# ===============================================================
-TARGET_JOB_NUMBER = "2527" 
+# 1. DYNAMIC TARGET CONFIGURATION
 # ===============================================================
 
-st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
+# 1. Fetch from secrets or URL FIRST (No visual Streamlit commands yet!)
+TARGET_JOB_NUMBER = None
+if "JOB_NUMBER" in st.secrets:
+    TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
+elif "job_number" in st.secrets:
+    TARGET_JOB_NUMBER = str(st.secrets["job_number"])
+else:
+    TARGET_JOB_NUMBER = st.query_params.get("job", None)
+
+# 2. PAGE CONFIG MUST BE THE VERY FIRST STREAMLIT COMMAND
+page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
+st.set_page_config(page_title=page_title, layout="wide")
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
+# 3. If STILL no job number is found, show the manual entry screen
+if not TARGET_JOB_NUMBER:
+    st.title("🌐 SoilFreeze Client Portal")
+    st.info("Please enter your assigned Job Number to view project telemetry.")
+    
+    manual_job = st.text_input("Job Number:", placeholder="e.g., 2527")
+    
+    if not manual_job:
+        st.stop()  # 🛑 Halts script execution here until a number is entered
+        
+    # Once they hit enter, update the URL and rerun the script from the top
+    st.query_params["job"] = str(manual_job)
+    st.rerun()
+
+# ===============================================================
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
@@ -76,16 +100,22 @@ def get_universal_portal_data(project_id):
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
               ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
             WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
-              AND m.timestamp >= CAST(p.Date_Freezedown AS TIMESTAMP)
+            
+              -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
+              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
               
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER: Restrict data precisely to registry timeframe window
-              AND EXTRACT(DATE FROM m.timestamp) >= n.Start_Date
-              AND (n.End_Date IS NULL OR EXTRACT(DATE FROM m.timestamp) <= n.End_Date)
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER (SAFE_CAST prevents DATE vs STRING mismatches)
+              AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              AND (
+                  n.End_Date IS NULL 
+                  OR TRIM(n.End_Date) = '' 
+                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
+              )
               
               -- 🔒 EXCLUSION FILTER: Drop masked, bad data
               AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
               
-              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES (Checks both master view and node registry schemas)
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
               AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
@@ -540,31 +570,39 @@ def render_client_portal():
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
        
     with tabs[4]:
-        asbuilt_filename = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            possible_paths = [
-                os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
-                os.path.join("assets", asbuilt_filename)
-            ]
-            img_found = False
-            for path in possible_paths:
-                if os.path.exists(path):
-                    try:
-                        with open(path, "rb") as img_file:
-                            img_bytes = img_file.read()
-                        
-                        st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                        img_found = True
-                        break
-                    except Exception as img_err:
-                        st.error(f"⚠️ Failed to decode image file stream: {img_err}")
-                        img_found = True 
-                        break
-            if not img_found:
-                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
+        asbuilt_raw = primary_meta.get('AsBuiltFile')
+        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
+            # Split the string by commas or semicolons, and remove any extra spaces
+            asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
+            
+            if not asbuilt_filenames:
+                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+            else:
+                for filename in asbuilt_filenames:
+                    possible_paths = [
+                        os.path.join("assets", "asbuilts", filename), 
+                        filename, 
+                        os.path.join("assets", filename)
+                    ]
+                    img_found = False
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            try:
+                                with open(path, "rb") as img_file:
+                                    img_bytes = img_file.read()
+                                
+                                st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
+                                st.markdown("<br>", unsafe_allow_html=True) # Adds a little spacing between images
+                                img_found = True
+                                break
+                            except Exception as img_err:
+                                st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
+                                img_found = True 
+                                break
+                    
+                    if not img_found:
+                        st.error(f"❌ Drawing Not Found: '{filename}'")
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
 # --- EXECUTION ---
 render_client_portal()
