@@ -94,12 +94,16 @@ def get_universal_portal_data(project_id):
                 m.approval_status,
                 n.Start_Date,
                 n.End_Date
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
+            FFROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             JOIN `{NODE_REGISTRY_TABLE}` n 
               ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+              
+            -- 🛡️ PARTIAL MATCH JOIN: Allows telemetry '2527' to match Registry '2527-Elizabeth'
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
-            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
+              ON CAST(p.Project AS STRING) LIKE CONCAT(CAST(m.Project AS STRING), '%')
+              
+            -- 🎯 TARGET LOCK: Binds the query strictly to the current phase being mapped
+            WHERE CAST(p.Project AS STRING) = CAST(@project_id AS STRING) 
             
               -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
               AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
@@ -314,9 +318,20 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-    df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
+    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
+    f_start_date = None
+    day_count_text = ""
+    
+    # Safely strip out Google Sheets sync artifacts like 'null', 'FALSE', or 'nan'
+    raw_fd = str(primary_meta.get('Date_Freezedown')).strip().lower()
+    
+    if raw_fd not in ['nan', 'none', 'null', 'false', 'true', '']:
+        try:
+            f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
+            days_since = (now_local - f_start_date).days
+            day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
+        except Exception:
+            pass # Fails gracefully if an unrecognizable date format slips through
 
     cols = st.columns(4)
     categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
@@ -571,7 +586,9 @@ def render_client_portal():
        
     with tabs[4]:
         asbuilt_raw = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
+        
+        # Added protection against text strings like "null" synced from the spreadsheet
+        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip().lower() not in ['', 'null', 'none', 'false']:
             # Split the string by commas or semicolons, and remove any extra spaces
             asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
             
