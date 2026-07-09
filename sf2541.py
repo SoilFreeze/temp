@@ -94,25 +94,33 @@ def get_universal_portal_data(project_id):
                 m.approval_status,
                 n.Start_Date,
                 n.End_Date
-            FFROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             JOIN `{NODE_REGISTRY_TABLE}` n 
               ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
-              
-            -- 🛡️ PARTIAL MATCH JOIN: Allows telemetry '2527' to match Registry '2527-Elizabeth'
+            
+            -- 🛡️ SPLIT MATCH: Splits '2541-Blackjack' at the hyphen and matches just '2541' to telemetry
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
-              ON CAST(p.Project AS STRING) LIKE CONCAT(CAST(m.Project AS STRING), '%')
+              ON SPLIT(CAST(p.Project AS STRING), '-')[OFFSET(0)] = CAST(m.Project AS STRING)
               
             -- 🎯 TARGET LOCK: Binds the query strictly to the current phase being mapped
-            WHERE CAST(p.Project AS STRING) = CAST(@project_id AS STRING) 
+            WHERE CAST(m.Project AS STRING) = SPLIT(CAST(@project_id AS STRING), '-')[OFFSET(0)]
             
-              -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
-              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
+              -- 🛡️ DATE FAILSAFES: If the cell is blank or "null", it skips the filter instead of dropping the data
+              AND (
+                  p.Date_Freezedown IS NULL 
+                  OR LOWER(TRIM(CAST(p.Date_Freezedown AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
+              )
               
-              -- 📍 STRICT LOCATION REASSIGNMENT FILTER (SAFE_CAST prevents DATE vs STRING mismatches)
-              AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              AND (
+                  n.Start_Date IS NULL
+                  OR LOWER(TRIM(CAST(n.Start_Date AS STRING))) IN ('', 'null', 'nan', 'false')
+                  OR EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              )
+              
               AND (
                   n.End_Date IS NULL 
-                  OR TRIM(n.End_Date) = '' 
+                  OR LOWER(TRIM(CAST(n.End_Date AS STRING))) IN ('', 'null', 'nan', 'false')
                   OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
               )
               
