@@ -44,7 +44,7 @@ PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
 # Migration Targets for Google Sheets / Native Table Migration Phase
-PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
+PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
 NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
 
 # --- CORE UTILITIES ---
