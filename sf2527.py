@@ -21,7 +21,7 @@ DATASET_ID = "Temperature"
 
 # Migration Targets for Google Sheets / Native Table Migration Phase
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
-NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_native"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
 
 # --- CORE UTILITIES ---
 
@@ -70,7 +70,7 @@ def get_universal_portal_data(project_id):
                 m.approval_status,
                 n.Start_Date,
                 n.End_Date
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view` m
+            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
             JOIN `{NODE_REGISTRY_TABLE}` n 
               ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
             JOIN `{PROJECT_REGISTRY_TABLE}` p 
