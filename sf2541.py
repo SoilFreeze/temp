@@ -8,19 +8,44 @@ from google.oauth2 import service_account
 from datetime import datetime, timedelta
 
 # ===============================================================
-# 1. TARGET CONFIGURATION
-# ===============================================================
-TARGET_JOB_NUMBER = "2541" 
+# 1. DYNAMIC TARGET CONFIGURATION
 # ===============================================================
 
-st.set_page_config(page_title=f"SoilFreeze Portal #{TARGET_JOB_NUMBER}", layout="wide")
+# 1. Fetch from secrets or URL FIRST (No visual Streamlit commands yet!)
+TARGET_JOB_NUMBER = None
+if "JOB_NUMBER" in st.secrets:
+    TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
+elif "job_number" in st.secrets:
+    TARGET_JOB_NUMBER = str(st.secrets["job_number"])
+else:
+    TARGET_JOB_NUMBER = st.query_params.get("job", None)
+
+# 2. PAGE CONFIG MUST BE THE VERY FIRST STREAMLIT COMMAND
+page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
+st.set_page_config(page_title=page_title, layout="wide")
 st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
 
+# 3. If STILL no job number is found, show the manual entry screen
+if not TARGET_JOB_NUMBER:
+    st.title("🌐 SoilFreeze Client Portal")
+    st.info("Please enter your assigned Job Number to view project telemetry.")
+    
+    manual_job = st.text_input("Job Number:", placeholder="e.g., 2527")
+    
+    if not manual_job:
+        st.stop()  # 🛑 Halts script execution here until a number is entered
+        
+    # Once they hit enter, update the URL and rerun the script from the top
+    st.query_params["job"] = str(manual_job)
+    st.rerun()
+
+# ===============================================================
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
 # Migration Targets for Google Sheets / Native Table Migration Phase
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry_backup"
+NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
 
 # --- CORE UTILITIES ---
 
@@ -47,64 +72,60 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 @st.cache_data(ttl=600)
-def get_universal_portal_data(selected_phase_name):
+def get_universal_portal_data(project_id):
     """
-    Fetches client telemetry directly from the v2 master view, using Python Regex 
-    to create an indestructible, space-agnostic phase matching query.
+    Fetches approved client telemetry, surgically bound between the deployment's 
+    Start_Date and End_Date as defined in the node registry. Cleans out masked data,
+    bad data, and ignores everything assigned to 'Office' loops or unassigned inventory.
     """
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
-    # ---------------------------------------------------------
-    # SMART PHASE DETECTION
-    # ---------------------------------------------------------
-    # Check if the selected tab contains a Phase number (e.g. extracts "2" from "Phase2")
-    phase_match = re.search(r'Phase\s*(\d+)', selected_phase_name, re.IGNORECASE)
-    
-    if phase_match:
-        p_num = phase_match.group(1)
-        # It IS a specific phase (e.g. Phase 2). Search for '2541' AND the digit '2'
-        sql_phase_filter = f"""
-            UPPER(CAST(m.Project AS STRING)) LIKE '%{TARGET_JOB_NUMBER}%'
-            AND (
-                UPPER(REPLACE(CAST(m.Phase AS STRING), ' ', '')) LIKE '%PHASE{p_num}%' OR 
-                CAST(m.Phase AS STRING) = '{p_num}' OR
-                UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) LIKE '%PHASE{p_num}%'
-            )
-        """
-    else:
-        # It's the Base Project. Search for '2541' but explicitly EXCLUDE Phase 2, 3, etc.
-        sql_phase_filter = f"""
-            UPPER(CAST(m.Project AS STRING)) LIKE '%{TARGET_JOB_NUMBER}%'
-            AND (
-                m.Phase IS NULL OR 
-                m.Phase = '' OR
-                m.Phase = '1' OR
-                (UPPER(CAST(m.Phase AS STRING)) NOT LIKE '%PHASE%' AND CAST(m.Phase AS STRING) NOT IN ('2', '3', '4', '5'))
-            )
-            AND UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) NOT LIKE '%PHASE2%'
-            AND UPPER(REPLACE(CAST(m.Project AS STRING), ' ', '')) NOT LIKE '%PHASE3%'
-        """
-
     query = f"""
         WITH filtered_base AS (
             SELECT 
                 m.Project, 
-                m.Phase,
-                m.System,
                 m.NodeNum, 
-                m.Bank, 
-                m.Location, 
-                m.Depth, 
+                n.Bank, 
+                n.Location, 
+                n.Depth, 
                 m.temperature, 
-                m.timestamp
+                m.timestamp, 
+                m.approval_status,
+                n.Start_Date,
+                n.End_Date
             FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m
-            WHERE 
-              ({sql_phase_filter})
-              AND m.temperature >= -30.0 AND m.temperature <= 120.0
+            JOIN `{NODE_REGISTRY_TABLE}` n 
+              ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(n.NodeNum AS STRING)))
+            JOIN `{PROJECT_REGISTRY_TABLE}` p 
+              ON CAST(m.Project AS STRING) = CAST(p.Project AS STRING)
+            WHERE CAST(m.Project AS STRING) = CAST(@project_id AS STRING) 
+            
+              -- 🛡️ SAFE_CAST prevents crashes if Date_Freezedown is blank in the registry
+              AND m.timestamp >= SAFE_CAST(p.Date_Freezedown AS TIMESTAMP)
+              
+              -- 📍 STRICT LOCATION REASSIGNMENT FILTER (SAFE_CAST prevents DATE vs STRING mismatches)
+              AND EXTRACT(DATE FROM m.timestamp) >= SAFE_CAST(n.Start_Date AS DATE)
+              AND (
+                  n.End_Date IS NULL 
+                  OR TRIM(n.End_Date) = '' 
+                  OR EXTRACT(DATE FROM m.timestamp) <= SAFE_CAST(n.End_Date AS DATE)
+              )
+              
+              -- 🔒 EXCLUSION FILTER: Drop masked, bad data
+              AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'PENDING')) NOT IN ('BADDATA', 'FALSE', '0', 'MASKED')
+              
+              -- 🚫 ABSOLUTE OFFICE / DESK EXCLUSION RULES
+              AND UPPER(TRIM(CAST(n.Project AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%OFFICE%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%DESK%'
+              AND UPPER(TRIM(CAST(n.Location AS STRING))) NOT LIKE '%TEST%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%OFFICE%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%DESK%'
               AND UPPER(TRIM(CAST(m.Location AS STRING))) NOT LIKE '%TEST%'
+              
+              AND n.SensorStatus IN ('On Project', 'Available')
+              AND m.temperature >= -30.0 AND m.temperature <= 120.0
         ),
         gap_evaluation AS (
             SELECT 
@@ -113,14 +134,14 @@ def get_universal_portal_data(selected_phase_name):
             FROM filtered_base
         )
         SELECT 
-            *
+            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
         FROM gap_evaluation
         WHERE prev_timestamp IS NULL 
            OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
         ORDER BY timestamp ASC
     """
-    
-    return client.query(query).to_dataframe()
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("project_id", "STRING", project_id)])
+    return client.query(query, job_config=job_config).to_dataframe()
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
@@ -144,11 +165,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     if curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            # Use LIKE with a trailing wildcard to match the specific T-number
-            # while allowing for the extra descriptive text (e.g., '-Sat Silt')
             target_q = f"""
                 SELECT CurveID, Day, Temp FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE REGEXP_CONTAINS(CurveID, r'^{curve_id}([^0-9]|$)')
+                WHERE UPPER(CurveID) LIKE UPPER('%{TARGET_JOB_NUMBER}%') 
+                AND UPPER(CurveID) LIKE UPPER('%{loc_part}%')
                 ORDER BY Day
             """
             target_df = client.query(target_q).to_dataframe()
@@ -165,8 +185,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                         line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
                         legendrank=1 
                     ))
-        except Exception as e: 
-            pass # Fail silently in production
+        except: pass
             
     sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
     
@@ -188,14 +207,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
     ]
 
-    # Update the color map logic to give Ambient a permanent distinct color
     unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
-    position_color_map = {}
-    for idx, pos in enumerate(unique_positions):
-        if any(x in str(pos).upper() for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE']):
-            position_color_map[pos] = 'rgba(100, 100, 100, 0.8)' # Distinct dark grey
-        else:
-            position_color_map[pos] = sf_15_palette[idx % len(sf_15_palette)]
+    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
 
     # Identify the latest node context checking in for each position to deduplicate legend display
     latest_nodes_by_pos = {}
@@ -225,6 +238,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         display_name = f"{pos} ({active_node})"
         
         # ⏱️ 24-HOUR CHART GAP BUILDER
+        # Evaluates consecutive timestamps. If a jump > 24 hours exists, inserts a row containing 
+        # a None entry right before the jump. This explicitly cuts off the Plotly line visualization.
         pos_df = pos_df.sort_values('timestamp')
         time_deltas = pos_df['timestamp'].diff()
         gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
@@ -233,9 +248,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             inserted_gaps = []
             for idx in gap_indices:
                 gap_row = pos_df.loc[idx].copy()
+                # Place the gap timestamp exactly 1 second after the previous valid timestamp
                 prev_ts = pos_df.loc[pos_df.index[pos_df.index.get_loc(idx) - 1]]['timestamp']
                 gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                gap_row['temperature'] = None  
+                gap_row['temperature'] = None  # None kills the connecting segment trace
                 inserted_gaps.append(gap_row)
             
             pos_df = pd.concat([pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -244,7 +260,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
             mode='lines',
-            connectgaps=False,  
+            connectgaps=False,  # Enforces physical segment termination at None rows
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
@@ -279,6 +295,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
+    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
@@ -333,6 +350,7 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
+    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
     
     st.sidebar.subheader("📐 Profile Settings")
@@ -343,6 +361,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
     
+    # Post-extraction sanity pass to keep out any test configurations that slipped through
     depth_df = depth_df[
         (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
         (~depth_df['Location'].str.upper().str.contains('DESK')) &
@@ -445,9 +464,6 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
-    # =========================================================
-    # 1. FETCH REGISTRY & CREATE MASTER PHASE SELECTOR
-    # =========================================================
     proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{TARGET_JOB_NUMBER}%'"
     proj_registry = client.query(proj_q).to_dataframe()
 
@@ -455,54 +471,35 @@ def render_client_portal():
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
 
-    proj_registry = proj_registry.sort_values('Project').reset_index(drop=True)
-    phase_list = proj_registry['Project'].tolist()
-    
-    if len(phase_list) > 1:
-        st.markdown("### 🏗️ Select Project Phase")
-        selected_phase = st.radio("Phase Selection", options=phase_list, horizontal=True, label_visibility="collapsed")
-    else:
-        selected_phase = phase_list[0]
-        
-    st.divider()
-
-    # =========================================================
-    # 2. LOCK METADATA TO THE SELECTED PHASE
-    # =========================================================
-    primary_meta = proj_registry[proj_registry['Project'] == selected_phase].iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', selected_phase)
+    primary_meta = proj_registry.iloc[0].to_dict()
+    display_name = primary_meta.get('ProjectName', TARGET_JOB_NUMBER)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
     f_start_date = None
     day_count_text = ""
-    
     if pd.notnull(primary_meta.get('Date_Freezedown')):
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
 
-    # =========================================================
-    # 3. FETCH AND CLEAN DATA (STRICTLY FOR ACTIVE PHASE)
-    # =========================================================
-    with st.spinner(f"Synchronizing official records for {selected_phase}..."):
-        full_p_df = get_universal_portal_data(selected_phase)
+    with st.spinner("Synchronizing official records..."):
+        all_phases = [get_universal_portal_data(p_id) for p_id in proj_registry['Project']]
+        full_p_df = pd.concat(all_phases) if all_phases else pd.DataFrame()
 
     if full_p_df.empty:
-        st.warning(f"⚠️ No approved data records available yet for {selected_phase}.")
+        st.warning("⚠️ No approved data records available yet.")
         return
 
     full_p_df = full_p_df[(full_p_df['temperature'] >= -30.0) & (full_p_df['temperature'] <= 120.0)]
 
+    # Clean out any trailing office records that managed to bypass subqueries
     full_p_df = full_p_df[
         (~full_p_df['Location'].str.upper().str.contains('OFFICE')) &
         (~full_p_df['Location'].str.upper().str.contains('DESK')) &
         (~full_p_df['Location'].str.upper().str.contains('TEST'))
     ]
 
-    # =========================================================
-    # 4. RENDER UI HEADER
-    # =========================================================
     st.title(f"📊 {display_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
@@ -514,9 +511,6 @@ def render_client_portal():
     with head_c2:
         if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
 
-    # =========================================================
-    # 5. RENDER DASHBOARD TABS
-    # =========================================================
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
@@ -525,34 +519,29 @@ def render_client_portal():
     with tabs[1]:
         weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
         
-        # --- AMBIENT ROUTING LOGIC ---
-        ambient_keywords = ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']
-        
-        # 1. Isolate Ambient Data into its own dataframe
-        ambient_mask = full_p_df['Location'].str.upper().apply(
-            lambda x: any(k in x for k in ambient_keywords) if pd.notnull(x) else False
-        )
-        ambient_df = full_p_df[ambient_mask].copy()
-        
-        # 2. Get standard locations, explicitly filtering OUT ambient so it doesn't get its own tab
-        locations = sorted([
-            str(loc) for loc in full_p_df['Location'].dropna().unique() 
-            if not any(k in str(loc).upper() for k in ambient_keywords)
-        ], key=natural_sort_key)
-        
+        locations = sorted([str(loc) for loc in full_p_df['Location'].dropna().unique()], key=natural_sort_key)
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
-                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
-                
-                # 3. INJECT AMBIENT DATA: If this is a brine pipe, append the ambient data
-                if is_brine_pipe and not ambient_df.empty:
-                    loc_data = pd.concat([loc_data, ambient_df])
+                matched_project_id = loc_data['Project'].iloc[0]
+                phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                loc_f_start_date = f_start_date
                 
+                if not phase_row.empty:
+                    raw_phase_fd = phase_row.iloc[0].get('Date_Freezedown')
+                    if pd.notnull(raw_phase_fd):
+                        loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
+                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                        
+                        if weeks_view:
+                            loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                
+                # --- EXCLUSION PROTOCOL: BLOCK THEORETICAL CURVES ON BRINE MANIFOLDS ---
+                is_brine_pipe = any(x in str(loc).upper() for x in ['S', 'R', 'SUPPLY', 'RETURN'])
                 graph_curve_id = None if is_brine_pipe else f"{TARGET_JOB_NUMBER}-{loc}"
                 
                 st.plotly_chart(build_high_speed_graph(
@@ -563,7 +552,7 @@ def render_client_portal():
                     "Fahrenheit", 
                     "°F", 
                     local_tz, 
-                    f_start_date, 
+                    loc_f_start_date, 
                     graph_curve_id
                 ), use_container_width=True)
 
@@ -579,33 +568,41 @@ def render_client_portal():
         latest = latest.sort_values(by='sort_idx').drop(columns=['sort_idx'])
         
         st.dataframe(latest[['Location', 'Position', 'temperature', 'timestamp']], use_container_width=True, hide_index=True)
-        
+       
     with tabs[4]:
-        asbuilt_filename = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_filename) and str(asbuilt_filename).strip() != "":
-            possible_paths = [
-                os.path.join("assets", "asbuilts", asbuilt_filename), 
-                asbuilt_filename, 
-                os.path.join("assets", asbuilt_filename)
-            ]
-            img_found = False
-            for path in possible_paths:
-                if os.path.exists(path):
-                    try:
-                        with open(path, "rb") as img_file:
-                            img_bytes = img_file.read()
-                        
-                        st.image(img_bytes, caption=f"Project Plan: {asbuilt_filename}", use_container_width=True)
-                        img_found = True
-                        break
-                    except Exception as img_err:
-                        st.error(f"⚠️ Failed to decode image file stream: {img_err}")
-                        img_found = True 
-                        break
-            if not img_found:
-                st.error(f"❌ Drawing Not Found: '{asbuilt_filename}'")
+        asbuilt_raw = primary_meta.get('AsBuiltFile')
+        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
+            # Split the string by commas or semicolons, and remove any extra spaces
+            asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
+            
+            if not asbuilt_filenames:
+                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+            else:
+                for filename in asbuilt_filenames:
+                    possible_paths = [
+                        os.path.join("assets", "asbuilts", filename), 
+                        filename, 
+                        os.path.join("assets", filename)
+                    ]
+                    img_found = False
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            try:
+                                with open(path, "rb") as img_file:
+                                    img_bytes = img_file.read()
+                                
+                                st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
+                                st.markdown("<br>", unsafe_allow_html=True) # Adds a little spacing between images
+                                img_found = True
+                                break
+                            except Exception as img_err:
+                                st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
+                                img_found = True 
+                                break
+                    
+                    if not img_found:
+                        st.error(f"❌ Drawing Not Found: '{filename}'")
         else:
             st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
 # --- EXECUTION ---
 render_client_portal()
