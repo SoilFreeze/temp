@@ -84,14 +84,15 @@ def get_universal_portal_data(target_job_number):
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
         WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
         
-          -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
-          -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
+          -- 🔒 THE IRONCLAD ALLOWLIST
           AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
           
-          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
+          -- 🚀 FIX 1: Removed the strict SensorStatus filter completely to match Internal App
+          
+          -- 🚀 FIX 2: Safely handle NULL locations from 3rd party loggers so BigQuery doesn't delete them
+          AND UPPER(TRIM(CAST(IFNULL(Location, '') AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(IFNULL(Location, '') AS STRING))) NOT LIKE '%DESK%'
+          AND UPPER(TRIM(CAST(IFNULL(Location, '') AS STRING))) NOT LIKE '%TEST%'
           AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
           
           AND temperature >= -30.0 AND temperature <= 120.0
