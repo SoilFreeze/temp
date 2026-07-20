@@ -79,35 +79,22 @@ def get_universal_portal_data(target_job_number):
     root_job_id = str(target_job_number).split('-')[0].strip()
     
     query = f"""
-        WITH filtered_base AS (
-            SELECT 
-                Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-            FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-            WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
-            
-              -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
-              -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
-              AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
-              
-              AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
-              AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
-              AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
-              
-              AND temperature >= -30.0 AND temperature <= 120.0
-        ),
-        gap_evaluation AS (
-            SELECT 
-                *,
-                LAG(timestamp) OVER (PARTITION BY NodeNum, Location, Depth, Bank ORDER BY timestamp ASC) as prev_timestamp
-            FROM filtered_base
-        )
         SELECT 
             Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status
-        FROM gap_evaluation
-        WHERE prev_timestamp IS NULL 
-           OR TIMESTAMP_DIFF(timestamp, prev_timestamp, HOUR) <= 24
+        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
+        WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = @root_job_id
+        
+          -- 🔒 THE IRONCLAD ALLOWLIST: Strips spaces and forces uppercase. 
+          -- Accepts 'true', 'True', and 'TRUE'. Blocks absolutely everything else.
+          AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
+          
+          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
+          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
+          AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
+          
+          AND temperature >= -30.0 AND temperature <= 120.0
         ORDER BY timestamp ASC
     """
     
@@ -241,9 +228,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         fig.add_trace(go.Scatter(
             x=pos_df['timestamp'], y=pos_df['temperature'], 
             name=display_name, 
-            mode='lines',
-            connectgaps=False,  # Enforces physical segment termination at None rows
+            mode='lines+markers',  # FIX: Show single isolated points
+            connectgaps=False,  
             line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
+            marker=dict(size=4),   # FIX: Clean, visible marker size
             showlegend=True,
             hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
             text=pos_df['NodeNum']
