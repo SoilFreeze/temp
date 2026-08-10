@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-new_url = "https://soilfreeze.streamlit.app/?job=2527"
+new_url = "https://soilfreeze.streamlit.app/?job=2538"
 
 st.write("Redirecting to the updated site...")
 
