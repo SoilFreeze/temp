@@ -17,3 +17,4 @@ st.write("Redirecting to the updated site...")
 
 # Execute the redirect
 components.html(redirect_code)
+ 
