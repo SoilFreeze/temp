@@ -1,20 +1,19 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-# The URL for your updated client site
 new_url = "https://soilfreeze.streamlit.app/?job=2527"
 
-# JavaScript to immediately redirect the browser
-# We use window.parent.location to ensure it breaks out of Streamlit's iframe
+st.write("Redirecting to the updated site...")
+
+# The manual fallback link
+st.markdown(f"**[If this doesn't update, click here.]({new_url})**")
+
+# The automatic redirect attempt (using window.top to try and bypass the iframe)
 redirect_code = f"""
+<meta http-equiv="refresh" content="0; url={new_url}">
 <script>
-    window.parent.location.href = '{new_url}';
+    window.top.location.href = '{new_url}';
 </script>
 """
 
-# Show a quick loading message just in case it takes a split second
-st.write("Redirecting to the updated site...")
-
-# Execute the redirect
 components.html(redirect_code)
- 
